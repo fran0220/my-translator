@@ -193,8 +193,8 @@ export class TranscriptUI {
           <line x1="12" y1="19" x2="12" y2="23"/>
           <line x1="8" y1="23" x2="16" y2="23"/>
         </svg>
-        <p>Press ▶ to start translating</p>
-        <p class="shortcut-hint">⌘ Enter</p>
+        <p>点击 ▶ 开始翻译</p>
+        <p class="shortcut-hint">Ctrl / ⌘ + Enter</p>
       </div>
     `;
         this.segments = [];
@@ -226,7 +226,7 @@ export class TranscriptUI {
             <div class="listening-waves">
                 <span></span><span></span><span></span><span></span><span></span>
             </div>
-            <p>Listening...</p>
+            <p>正在聆听…</p>
         `;
         this.contentEl.appendChild(indicator);
     }
@@ -292,7 +292,7 @@ export class TranscriptUI {
 
         // Transcript entries
         for (const seg of this.segments) {
-            if (seg.speaker) lines.push(`**Speaker ${seg.speaker}:**`);
+            if (seg.speaker) lines.push(`**说话人 ${seg.speaker}：**`);
             if (seg.original) lines.push(`> ${seg.original}`);
             if (seg.translation) lines.push(seg.translation);
             lines.push('');
@@ -341,7 +341,7 @@ export class TranscriptUI {
 
         // Transcript entries
         for (const seg of this.sessionLog) {
-            if (seg.speaker) lines.push(`**Speaker ${seg.speaker}:**`);
+            if (seg.speaker) lines.push(`**说话人 ${seg.speaker}：**`);
             if (seg.original) lines.push(`> ${seg.original}`);
             if (seg.translation) lines.push(seg.translation);
             lines.push('');
@@ -418,7 +418,7 @@ export class TranscriptUI {
         for (const seg of this.segments) {
             // Speaker label
             if (seg.speaker && seg.speaker !== lastRenderedSpeaker) {
-                html += `<span class="speaker-label">Speaker ${seg.speaker}:</span> `;
+                html += `<span class="speaker-label">说话人 ${seg.speaker}：</span> `;
                 lastRenderedSpeaker = seg.speaker;
             }
 
@@ -439,7 +439,7 @@ export class TranscriptUI {
 
         if (this.provisionalText) {
             if (this.provisionalSpeaker && this.provisionalSpeaker !== lastRenderedSpeaker) {
-                html += `<span class="speaker-label">Speaker ${this.provisionalSpeaker}:</span> `;
+                html += `<span class="speaker-label">说话人 ${this.provisionalSpeaker}：</span> `;
             }
             if (this.provisionalLanguage && this.provisionalLanguage !== lastRenderedLang) {
                 html += `<span class="lang-badge">${this._langEmoji(this.provisionalLanguage)}</span> `;
@@ -479,7 +479,7 @@ export class TranscriptUI {
         for (const seg of this.segments) {
             let speakerHtml = '';
             if (seg.speaker && seg.speaker !== lastSpeaker) {
-                speakerHtml = `<div class="speaker-label">Speaker ${seg.speaker}:</div>`;
+                speakerHtml = `<div class="speaker-label">说话人 ${seg.speaker}：</div>`;
                 lastSpeaker = seg.speaker;
             }
 

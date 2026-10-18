@@ -10,8 +10,8 @@ if (!window.__TAURI__ && location.port === '3111') {
 
     const mockSettings = {
         translation_mode: 'soniox',
-        source_language: 'auto',
-        target_language: 'vi',
+        source_language: 'en',
+        target_language: 'zh',
         soniox_api_key: '',
         elevenlabs_api_key: '',
         google_tts_api_key: '',

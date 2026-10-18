@@ -5,6 +5,7 @@
 
 import { settingsManager } from './settings.js';
 import { TranscriptUI } from './ui.js';
+import { initBroadcastOutput } from './broadcast-output.js';
 import { sonioxClient } from './soniox.js';
 import { elevenLabsTTS } from './elevenlabs-tts.js';
 import { googleTTS } from './google-tts.js';
@@ -62,6 +63,17 @@ class App {
         // Init transcript UI
         const transcriptContainer = document.getElementById('transcript-content');
         this.transcriptUI = new TranscriptUI(transcriptContainer);
+        this.transcriptUI.configure({ viewMode: 'dual' });
+        initBroadcastOutput(this.transcriptUI);
+
+        document.getElementById('select-direction').addEventListener('change', (event) => {
+            if (!event.target.value) return;
+            const [source, target] = event.target.value.split('-');
+            document.getElementById('select-source-lang').value = source;
+            document.getElementById('select-target-lang').value = target;
+            document.getElementById('select-translation-type').value = 'one_way';
+            this._updateTranslationTypeUI('one_way');
+        });
 
         // Init session store — one session file lives across many Start/Pause
         // cycles; it autosaves while recording and finalizes on Stop or app close.
@@ -159,8 +171,8 @@ class App {
                 // Platform-accurate label: Mac Intel needs Apple Silicon;
                 // Windows/Linux aren't supported at all.
                 const reason = this._platformOs === 'macos'
-                    ? ' — cần chip Apple Silicon'
-                    : ' — chỉ hỗ trợ macOS Apple Silicon';
+                    ? ' — 需要 Apple Silicon 芯片'
+                    : ' — 仅支持 macOS Apple Silicon';
                 localOption.textContent += reason;
             }
 
@@ -197,7 +209,7 @@ class App {
             const content = document.getElementById('session-viewer-content')?.textContent || '';
             if (content) {
                 await navigator.clipboard.writeText(content);
-                this._showToast('Copied to clipboard', 'success');
+                this._showToast('已复制到剪贴板', 'success');
             }
         });
 
@@ -216,19 +228,19 @@ class App {
         document.getElementById('btn-session-edit-title')?.addEventListener('click', async () => {
             const cur = this._currentViewedSession;
             if (!cur || cur.isLegacy) {
-                this._showToast('Cannot rename legacy sessions', 'error');
+                this._showToast('无法重命名旧版会话', 'error');
                 return;
             }
             const titleEl = document.getElementById('session-viewer-title');
             const oldTitle = titleEl?.textContent || '';
-            const newTitle = prompt('Rename session:', oldTitle);
+            const newTitle = prompt('重命名会话：', oldTitle);
             if (newTitle == null || newTitle === oldTitle) return;
             try {
                 await invoke('update_session_title', { id: cur.id, title: newTitle });
                 if (titleEl) titleEl.textContent = newTitle;
-                this._showToast('Renamed', 'success');
+                this._showToast('已重命名', 'success');
             } catch (err) {
-                this._showToast(`Rename failed: ${err}`, 'error');
+                this._showToast(`重命名失败：${err}`, 'error');
             }
         });
 
@@ -286,7 +298,7 @@ class App {
                 }
             } catch (err) {
                 console.error('[App] Start/Stop error:', err);
-                this._showToast(`Error: ${err}`, 'error');
+                this._showToast(`错误：${err}`, 'error');
                 this.isRunning = false;
                 this._updateStartButton();
                 this._updateStatus('error');
@@ -306,7 +318,7 @@ class App {
                 await this.pause();
             } catch (err) {
                 console.error('[App] Pause error:', err);
-                this._showToast(`Error: ${err}`, 'error');
+                this._showToast(`错误：${err}`, 'error');
             }
         });
 
@@ -328,9 +340,9 @@ class App {
             const text = this.transcriptUI.getPlainText();
             if (text) {
                 await navigator.clipboard.writeText(text);
-                this._showToast('Copied to clipboard', 'success');
+                this._showToast('已复制到剪贴板', 'success');
             } else {
-                this._showToast('Nothing to copy', 'info');
+                this._showToast('没有可复制的内容', 'info');
             }
         });
 
@@ -339,7 +351,7 @@ class App {
             try {
                 await invoke('open_transcript_dir');
             } catch (err) {
-                this._showToast('Failed to open folder: ' + err, 'error');
+                this._showToast('打开文件夹失败：' + err, 'error');
             }
         });
 
@@ -402,7 +414,7 @@ class App {
         document.querySelectorAll('#engine-pill .engine-pill-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 if (this.isRunning || this.isStarting) {
-                    this._showToast('Pause the session before switching engine', 'error');
+                    this._showToast('请先暂停会话再切换引擎', 'error');
                     return;
                 }
                 this._selectEngineClass(btn.dataset.engineClass);
@@ -553,7 +565,7 @@ class App {
             const sidInput = document.getElementById('input-tiktok-session');
             if (m && m[1] && sidInput && sidInput.value !== m[1]) {
                 sidInput.value = m[1];
-                this._showToast('sessionid extracted from cURL ✓', 'success');
+                this._showToast('已从 cURL 提取 sessionid ✓', 'success');
             }
         });
 
@@ -636,7 +648,7 @@ class App {
                         }
                     } catch (err) {
                         console.error('[App] Keyboard start/stop error:', err);
-                        this._showToast(`Error: ${err}`, 'error');
+                        this._showToast(`错误：${err}`, 'error');
                         this.isRunning = false;
                         this._updateStartButton();
                         this._updateStatus('error');
@@ -757,21 +769,21 @@ class App {
         if (subT) {
             subT.textContent =
                 `${engineNames[mode] || mode} · ${s.source_language || 'auto'} → ${s.target_language || 'vi'}` +
-                (hasKey ? '' : ' · ⚠️ chưa có API key');
+                (hasKey ? '' : ' · ⚠️ 尚未设置 API 密钥');
         }
 
         // TTS card: cloud-realtime engines run text-only — reflect on the card, never hide.
         const isCloudRealtime = mode === 'openai' || mode === 'qwen';
         const provNames = {
-            edge: 'Edge TTS', microsoft: 'Microsoft v2', 'google-free': 'Google TTS Free',
-            tiktok: 'TikTok TTS', local: 'Local (Offline)', google: 'Google Chirp HD', elevenlabs: 'ElevenLabs',
+            edge: 'Edge TTS', microsoft: 'Microsoft v2', 'google-free': 'Google TTS 免费版',
+            tiktok: 'TikTok TTS', local: '本地（离线）', google: 'Google Chirp HD', elevenlabs: 'ElevenLabs',
         };
         const cardTts = document.getElementById('card-tts');
         const subTts = document.getElementById('card-tts-sub');
         if (cardTts) cardTts.classList.toggle('disabled', isCloudRealtime);
         if (subTts) {
             if (isCloudRealtime) {
-                subTts.textContent = `Tắt — engine ${engineNames[mode]} chạy dạng chữ, không đọc tiếng`;
+                subTts.textContent = `已关闭 — ${engineNames[mode]} 引擎仅输出文字，不朗读`;
             } else {
                 const prov = s.tts_provider || 'edge';
                 const voice = prov === 'local' && s.local_tts_voice ? ` · ${s.local_tts_voice}` : '';
@@ -999,10 +1011,10 @@ class App {
 
         try {
             await settingsManager.save(settings);
-            this._showToast('Settings saved', 'success');
+            this._showToast('设置已保存', 'success');
             this._showView('overlay');
         } catch (err) {
-            this._showToast(`Failed to save: ${err}`, 'error');
+            this._showToast(`保存失败：${err}`, 'error');
         }
     }
 
@@ -1056,7 +1068,7 @@ class App {
         // Block TTS in two-way mode to prevent audio feedback loop
         const translationType = document.getElementById('select-translation-type')?.value;
         if (translationType === 'two_way') {
-            this._showToast('TTS is disabled in two-way mode to prevent audio loop', 'error');
+            this._showToast('双向翻译模式下已禁用语音朗读，以防止音频回授', 'error');
             return;
         }
 
@@ -1065,7 +1077,7 @@ class App {
         if (provider === 'local' && !this.ttsEnabled) {
             const installed = await this._isLocalVoiceInstalled(settings.local_tts_voice);
             if (!installed) {
-                this._showToast('Download a voice in Settings → TTS → Local', 'error');
+                this._showToast('请在“设置 → 语音朗读 → 本地”中下载语音', 'error');
                 this._showView('settings');
                 return;
             }
@@ -1073,17 +1085,17 @@ class App {
 
         // Check credentials for providers that require them (free providers need none)
         if (provider === 'elevenlabs' && !settings.elevenlabs_api_key) {
-            this._showToast('Add ElevenLabs API key in Settings → TTS', 'error');
+            this._showToast('请在“设置 → 语音朗读”中添加 ElevenLabs API 密钥', 'error');
             this._showView('settings');
             return;
         }
         if (provider === 'google' && !settings.google_tts_api_key) {
-            this._showToast('Add Google TTS API key in Settings → TTS', 'error');
+            this._showToast('请在“设置 → 语音朗读”中添加 Google TTS API 密钥', 'error');
             this._showView('settings');
             return;
         }
         if (provider === 'tiktok' && !settings.tiktok_session_id) {
-            this._showToast('Add a TikTok sessionid in Settings → TTS', 'error');
+            this._showToast('请在“设置 → 语音朗读”中添加 TikTok sessionid', 'error');
             this._showView('settings');
             return;
         }
@@ -1100,19 +1112,19 @@ class App {
                 audioPlayer.resume();
             }
             const label = {
-                edge: 'Edge TTS (Free)',
-                microsoft: 'Microsoft v2 (Free)',
-                'google-free': 'Google TTS (Free)',
-                tiktok: 'TikTok TTS (Free)',
-                local: 'Local Offline',
+                edge: 'Edge TTS（免费）',
+                microsoft: 'Microsoft v2（免费）',
+                'google-free': 'Google TTS（免费）',
+                tiktok: 'TikTok TTS（免费）',
+                local: '本地离线',
                 google: 'Google Chirp 3 HD',
                 elevenlabs: 'ElevenLabs',
             }[provider] || provider;
-            this._showToast(`TTS narration ON 🔊 (${label})`, 'success');
+            this._showToast(`语音朗读已开启 🔊（${label}）`, 'success');
         } else {
             tts.disconnect();
             audioPlayer.stop();
-            this._showToast('TTS narration OFF 🔇', 'success');
+            this._showToast('语音朗读已关闭 🔇', 'success');
         }
     }
 
@@ -1190,9 +1202,9 @@ class App {
         if (!list) return;
         const row = document.createElement('div');
         row.className = 'term-row';
-        row.innerHTML = `<input type="text" class="term-source" value="${source}" placeholder="Source" />` +
-            `<input type="text" class="term-target" value="${target}" placeholder="Target" />` +
-            `<button type="button" class="btn-remove-term" title="Remove">×</button>`;
+        row.innerHTML = `<input type="text" class="term-source" value="${source}" placeholder="原文" />` +
+            `<input type="text" class="term-target" value="${target}" placeholder="译文" />` +
+            `<button type="button" class="btn-remove-term" title="移除">×</button>`;
         row.querySelector('.btn-remove-term').addEventListener('click', () => row.remove());
         list.appendChild(row);
     }
@@ -1202,9 +1214,9 @@ class App {
         if (!list) return;
         const row = document.createElement('div');
         row.className = 'general-row';
-        row.innerHTML = `<input type="text" class="general-key" value="${this._escAttr(key)}" placeholder="Key (e.g. domain)" />` +
-            `<input type="text" class="general-value" value="${this._escAttr(value)}" placeholder="Value (e.g. Medical)" />` +
-            `<button type="button" class="btn-remove-general" title="Remove">×</button>`;
+        row.innerHTML = `<input type="text" class="general-key" value="${this._escAttr(key)}" placeholder="键（例如：领域）" />` +
+            `<input type="text" class="general-value" value="${this._escAttr(value)}" placeholder="值（例如：医学）" />` +
+            `<button type="button" class="btn-remove-general" title="移除">×</button>`;
         row.querySelector('.btn-remove-general').addEventListener('click', () => row.remove());
         list.appendChild(row);
     }
@@ -1239,13 +1251,13 @@ class App {
         const hint = document.getElementById('tts-provider-hint');
         if (hint) {
             const hints = {
-                edge: 'Free, natural voices — no API key needed',
-                microsoft: 'Free — full Microsoft voice list (vi + en), sent to Microsoft',
-                'google-free': 'Free — experimental, may stop working anytime. Text sent to Google',
-                tiktok: 'Free — needs a TikTok sessionid. Text sent to TikTok',
-                local: 'Free & 100% offline — download a voice below; nothing is sent anywhere',
-                google: 'Near-human quality — requires Google Cloud API key (1M chars/month free)',
-                elevenlabs: 'Premium quality — requires ElevenLabs API key',
+                edge: '免费、自然的语音 — 无需 API 密钥',
+                microsoft: '免费 — 完整的 Microsoft 语音列表（越南语和英语），文本将发送至 Microsoft',
+                'google-free': '免费 — 实验性功能，可能随时失效。文本将发送至 Google',
+                tiktok: '免费 — 需要 TikTok sessionid。文本将发送至 TikTok',
+                local: '免费且完全离线 — 请在下方下载语音；不会向外部发送任何内容',
+                google: '接近真人的音质 — 需要 Google Cloud API 密钥（每月免费 100 万字符）',
+                elevenlabs: '高品质语音 — 需要 ElevenLabs API 密钥',
             };
             hint.textContent = hints[provider] || '';
         }
@@ -1290,7 +1302,7 @@ class App {
         for (const v of list) {
             const opt = document.createElement('option');
             opt.value = v.short_name;
-            opt.textContent = `${v.friendly_name} (${v.gender})`;
+            opt.textContent = `${v.friendly_name}（${({ Female: '女声', Male: '男声' })[v.gender] || v.gender}）`;
             select.appendChild(opt);
         }
         // Keep the saved voice if it belongs to this language, else pick the first.
@@ -1315,7 +1327,7 @@ class App {
             try {
                 dirInput.value = await invoke('local_tts_models_dir_path');
             } catch {
-                dirInput.value = settingsManager.get().local_tts_models_dir || 'Default app location';
+                dirInput.value = settingsManager.get().local_tts_models_dir || '应用默认位置';
             }
         }
         // Speed slider from saved setting.
@@ -1361,7 +1373,7 @@ class App {
         const importedList = all.filter(v => v.imported);
         container.innerHTML = '';
         if (!catalogList.length && !importedList.length) {
-            container.innerHTML = '<p class="hint">No voices for this language.</p>';
+            container.innerHTML = '<p class="hint">此语言暂无可用语音。</p>';
             return;
         }
 
@@ -1376,12 +1388,12 @@ class App {
                     `<label style="flex:1;display:flex;align-items:center;gap:6px;cursor:pointer;">` +
                     `<input type="radio" name="local-voice" value="${v.id}" ${checked} />` +
                     `<span>${this._esc(v.display)}</span></label>` +
-                    `<button type="button" class="icon-btn small btn-local-delete" data-id="${v.id}" title="Delete">🗑️</button>`;
+                    `<button type="button" class="icon-btn small btn-local-delete" data-id="${v.id}" title="删除">🗑️</button>`;
             } else {
                 row.innerHTML =
                     `<span style="flex:1;color:var(--text-muted,#888);">${this._esc(v.display)} · ${sizeMb} MB</span>` +
                     `<span class="local-progress" data-id="${v.id}" style="min-width:64px;text-align:right;"></span>` +
-                    `<button type="button" class="icon-btn small btn-local-download" data-id="${v.id}" title="Download">⬇️</button>`;
+                    `<button type="button" class="icon-btn small btn-local-download" data-id="${v.id}" title="下载">⬇️</button>`;
             }
             container.appendChild(row);
         };
@@ -1391,7 +1403,7 @@ class App {
             const hdr = document.createElement('p');
             hdr.className = 'hint';
             hdr.style.cssText = 'margin:8px 0 2px;font-weight:600;';
-            hdr.textContent = `Imported (local) — ${importedList.length}`;
+            hdr.textContent = `已导入（本地）— ${importedList.length}`;
             container.appendChild(hdr);
             importedList.forEach(addRow);
         }
@@ -1427,11 +1439,11 @@ class App {
         };
         try {
             await invoke('local_tts_download_model', { id, onProgress });
-            this._showToast('Voice downloaded ✓', 'success');
+            this._showToast('语音已下载 ✓', 'success');
             await this._refreshLocalVoices();
             this._fillLocalVoices(document.getElementById('select-local-lang')?.value || 'vi');
         } catch (err) {
-            this._showToast(`Download failed: ${err}`, 'error');
+            this._showToast(`下载失败：${err}`, 'error');
             if (btn) btn.disabled = false;
             if (progressEl) progressEl.textContent = '';
         }
@@ -1441,11 +1453,11 @@ class App {
     async _deleteLocalVoice(id) {
         try {
             await invoke('local_tts_delete_model', { id });
-            this._showToast('Voice deleted', 'success');
+            this._showToast('语音已删除', 'success');
             await this._refreshLocalVoices();
             this._fillLocalVoices(document.getElementById('select-local-lang')?.value || 'vi');
         } catch (err) {
-            this._showToast(`Delete failed: ${err}`, 'error');
+            this._showToast(`删除失败：${err}`, 'error');
         }
     }
 
@@ -1457,7 +1469,7 @@ class App {
     async _maybePickModelsDir() {
         try {
             const { open } = window.__TAURI__.dialog;
-            const picked = await open({ directory: true, multiple: false, title: 'Choose model folder' });
+            const picked = await open({ directory: true, multiple: false, title: '选择模型文件夹' });
             if (picked === null || picked === undefined) return null; // cancelled
             const dir = Array.isArray(picked) ? picked[0] : picked;
             await settingsManager.save({ local_tts_models_dir: dir });
@@ -1480,12 +1492,12 @@ class App {
             try {
                 dirInput.value = await invoke('local_tts_models_dir_path');
             } catch {
-                dirInput.value = 'Default app location';
+                dirInput.value = '应用默认位置';
             }
         }
         await this._refreshLocalVoices();
         this._fillLocalVoices(document.getElementById('select-local-lang')?.value || 'vi');
-        this._showToast('Model folder reset to default', 'success');
+        this._showToast('模型文件夹已恢复为默认位置', 'success');
     }
 
     _updateTranslationTypeUI(type) {
@@ -1525,7 +1537,7 @@ class App {
         if (btn) {
             btn.classList.toggle('active', this.ttsEnabled);
             btn.classList.toggle('disabled', isTwoWay);
-            btn.title = isTwoWay ? 'TTS disabled in two-way mode' : 'Toggle TTS (Ctrl+T)';
+            btn.title = isTwoWay ? '双向翻译模式下已禁用语音朗读' : '切换语音朗读（Ctrl+T）';
         }
         if (iconOff) iconOff.style.display = this.ttsEnabled ? 'none' : 'block';
         if (iconOn) iconOn.style.display = this.ttsEnabled ? 'block' : 'none';
@@ -1579,7 +1591,7 @@ class App {
         const autoHideBtn = document.getElementById('btn-auto-hide');
         const renderAutoHide = () => {
             if (autoHideBtn) {
-                autoHideBtn.textContent = `${isAutoHideEnabled() ? '✓' : '　'} Tự ẩn khi đang dịch`;
+                autoHideBtn.textContent = `${isAutoHideEnabled() ? '✓' : '　'} 翻译时自动隐藏工具栏`;
             }
         };
         renderAutoHide();
@@ -1680,17 +1692,17 @@ class App {
         const provider = settings.tts_provider || 'edge';
         const tts = this._getActiveTTS();
         if (typeof tts.synthesize !== 'function') {
-            return { ok: false, reason: 'Nhà cung cấp TTS này không hỗ trợ chế độ Đọc. Hãy chọn Edge, Local, Microsoft, Google hoặc TikTok.' };
+            return { ok: false, reason: '此语音服务不支持朗读模式。请选择 Edge、本地、Microsoft、Google 或 TikTok。' };
         }
         if (provider === 'google' && !settings.google_tts_api_key) {
-            return { ok: false, reason: 'Thiếu Google Cloud API key (Cài đặt → TTS → Google).' };
+            return { ok: false, reason: '缺少 Google Cloud API 密钥（设置 → 语音朗读 → Google）。' };
         }
         if (provider === 'tiktok' && !settings.tiktok_session_id) {
-            return { ok: false, reason: 'Thiếu TikTok sessionid (Cài đặt → TTS → TikTok).' };
+            return { ok: false, reason: '缺少 TikTok sessionid（设置 → 语音朗读 → TikTok）。' };
         }
         if (provider === 'local') {
             const installed = await this._isLocalVoiceInstalled(settings.local_tts_voice);
-            if (!installed) return { ok: false, reason: 'Chưa tải model giọng Local (Cài đặt → TTS → Local).' };
+            if (!installed) return { ok: false, reason: '尚未下载本地语音模型（设置 → 语音朗读 → 本地）。' };
         }
         return { ok: true, provider };
     }
@@ -1709,7 +1721,7 @@ class App {
         if (!cap.ok) { this._showReadCapabilityHint(); return; }
 
         const text = (document.getElementById('read-input')?.value || '').trim();
-        if (!text) { this._showToast('Nhập văn bản để đọc', 'error'); return; }
+        if (!text) { this._showToast('请输入要朗读的文本', 'error'); return; }
 
         const settings = settingsManager.get();
         const provider = cap.provider;
@@ -1740,7 +1752,7 @@ class App {
         this._reader.onState = (state) => this._onReadState(state);
 
         this._reader.load(text, maxLen);
-        if (this._reader.total === 0) { this._showToast('Không có nội dung để đọc', 'error'); return; }
+        if (this._reader.total === 0) { this._showToast('没有可朗读的内容', 'error'); return; }
         this._renderReadChunks(this._reader.chunks);
         this._reader.play();
     }
@@ -1823,7 +1835,7 @@ class App {
 
     _updateReadProgress(n, total) {
         const prog = document.getElementById('read-progress');
-        if (prog) prog.textContent = `đoạn ${n}/${total}`;
+        if (prog) prog.textContent = `段落 ${n}/${total}`;
         const fill = document.getElementById('read-progress-fill');
         if (fill) fill.style.width = total ? `${Math.round((n / total) * 100)}%` : '0%';
     }
@@ -1832,7 +1844,7 @@ class App {
 
     _setSource(source) {
         const wasRunning = this.isRunning;
-        const labels = { system: 'System Audio', microphone: 'Microphone', both: 'System + Mic' };
+        const labels = { system: '系统音频', microphone: '麦克风', both: '系统音频 + 麦克风' };
         const label = labels[source] || source;
         // Persist so subsequent settings notifications don't reset us back.
         settingsManager.save({ audio_source: source });
@@ -1841,13 +1853,13 @@ class App {
             this.pause().then(() => {
                 this.currentSource = source;
                 this._updateSourceButtons();
-                this._showToast(`Switched to ${label}`, 'success');
+                this._showToast(`已切换至${label}`, 'success');
                 this.start();
             });
         } else {
             this.currentSource = source;
             this._updateSourceButtons();
-            this._showToast(`Source: ${label}`, 'success');
+            this._showToast(`音频来源：${label}`, 'success');
         }
     }
 
@@ -1942,10 +1954,10 @@ class App {
         const hintOpenAi = document.getElementById('hint-mode-openai');
         const hintQwen = document.getElementById('hint-mode-qwen');
         const ENGINE_HINTS = {
-            soniox: 'Cloud · 70+ languages · ~$0.12/hr',
-            local: 'Offline · free · ~3–4s delay',
-            openai: 'Cloud · 13 languages · text-only captions',
-            qwen: 'Cloud · 60+ languages · text-only · free preview · pick a source language',
+            soniox: '云端 · 70 多种语言 · 约 0.12 美元/小时',
+            local: '离线 · 免费 · 约 3–4 秒延迟',
+            openai: '云端 · 13 种语言 · 仅文字字幕',
+            qwen: '云端 · 60 多种语言 · 仅文字 · 免费预览 · 请选择源语言',
         };
         if (hintSoniox) {
             hintSoniox.textContent = ENGINE_HINTS[mode] || '';
@@ -1966,10 +1978,10 @@ class App {
             hintSoniox.classList.toggle('hint-warning', warn);
             if (localUnsupported) {
                 hintSoniox.textContent = this._platformOs === 'macos'
-                    ? '⚠️ Local MLX cần chip Apple Silicon — máy này không chạy được, hãy chọn engine khác.'
-                    : '⚠️ Local MLX chỉ chạy trên macOS Apple Silicon — trên máy này hãy chọn engine khác.';
+                    ? '⚠️ 本地 MLX 需要 Apple Silicon 芯片 — 此设备无法运行，请选择其他引擎。'
+                    : '⚠️ 本地 MLX 仅支持 macOS Apple Silicon — 请在此设备上选择其他引擎。';
             } else if (missingKey) {
-                hintSoniox.textContent = `⚠️ ${missingKey} cần API key — nhập key bên dưới rồi mới bắt đầu được.`;
+                hintSoniox.textContent = `⚠️ ${missingKey} 需要 API 密钥 — 请先在下方输入密钥再开始。`;
             }
         }
         if (hintLocal) hintLocal.style.display = 'none';
@@ -2043,10 +2055,10 @@ class App {
         const select = document.getElementById('select-target-lang');
         if (!select) return;
         const OPENAI_LANGS = [
-            ['en','English'], ['es','Spanish'], ['pt','Portuguese'], ['fr','French'],
-            ['de','German'], ['it','Italian'], ['ru','Russian'], ['hi','Hindi'],
-            ['id','Indonesian'], ['vi','Vietnamese'], ['ja','Japanese'],
-            ['ko','Korean'], ['zh','Chinese'],
+            ['en','英语'], ['es','西班牙语'], ['pt','葡萄牙语'], ['fr','法语'],
+            ['de','德语'], ['it','意大利语'], ['ru','俄语'], ['hi','印地语'],
+            ['id','印度尼西亚语'], ['vi','越南语'], ['ja','日语'],
+            ['ko','韩语'], ['zh','中文'],
         ];
         const current = select.value;
         if (mode === 'openai') {
@@ -2101,12 +2113,12 @@ class App {
         const sonioxStatus = document.getElementById('key-status-soniox');
         if (sonioxStatus) {
             sonioxStatus.className = 'key-status ' + (sonioxKey === '' ? '' : sonioxOk ? 'ok' : 'bad');
-            sonioxStatus.textContent = sonioxKey === '' ? '' : sonioxOk ? '✓ format ok' : '✗ check format';
+            sonioxStatus.textContent = sonioxKey === '' ? '' : sonioxOk ? '✓ 格式正确' : '✗ 请检查格式';
         }
         const openaiStatus = document.getElementById('key-status-openai');
         if (openaiStatus) {
             openaiStatus.className = 'key-status ' + (openaiKey === '' ? '' : openaiOk ? 'ok' : 'bad');
-            openaiStatus.textContent = openaiKey === '' ? '' : openaiOk ? '✓ format ok' : '✗ should start with sk-';
+            openaiStatus.textContent = openaiKey === '' ? '' : openaiOk ? '✓ 格式正确' : '✗ 应以 sk- 开头';
         }
 
         // Engines that need a key stay SELECTABLE even when it's missing —
@@ -2119,11 +2131,11 @@ class App {
             const openaiOpt = select.querySelector('option[value="openai"]');
             if (sonioxOpt) {
                 sonioxOpt.disabled = false;
-                sonioxOpt.textContent = sonioxOk ? '☁️ Soniox' : '☁️ Soniox — cần nhập key';
+                sonioxOpt.textContent = sonioxOk ? '☁️ Soniox' : '☁️ Soniox — 需要输入密钥';
             }
             if (openaiOpt) {
                 openaiOpt.disabled = false;
-                openaiOpt.textContent = openaiOk ? '⚡ OpenAI Realtime' : '⚡ OpenAI Realtime — cần nhập key';
+                openaiOpt.textContent = openaiOk ? '⚡ OpenAI Realtime' : '⚡ OpenAI Realtime — 需要输入密钥';
             }
         }
     }
@@ -2138,23 +2150,23 @@ class App {
         const key = document.getElementById(inputId)?.value.trim() || '';
         if (!key) {
             statusEl.className = 'key-status bad';
-            statusEl.textContent = '✗ empty';
+            statusEl.textContent = '✗ 不能为空';
             return;
         }
 
         btn.disabled = true;
         statusEl.className = 'key-status checking';
-        statusEl.textContent = '… testing';
+        statusEl.textContent = '… 正在测试';
 
         try {
             const ok = provider === 'soniox'
                 ? await this._pingSoniox(key)
                 : await this._pingOpenAi(key);
             statusEl.className = 'key-status ' + (ok ? 'ok' : 'bad');
-            statusEl.textContent = ok ? '✓ connected' : '✗ rejected';
+            statusEl.textContent = ok ? '✓ 连接成功' : '✗ 连接被拒绝';
         } catch (e) {
             statusEl.className = 'key-status bad';
-            statusEl.textContent = '✗ ' + (e?.message || 'failed');
+            statusEl.textContent = '✗ ' + (e?.message || '失败');
         } finally {
             btn.disabled = false;
         }
@@ -2207,35 +2219,35 @@ class App {
         // Local MLX needs macOS Apple Silicon — block here (option is selectable
         // but can't actually run on other platforms) instead of crashing.
         if (this.translationMode === 'local' && !this.isAppleSilicon) {
-            this._showToast('Local MLX chỉ chạy trên macOS Apple Silicon. Hãy chọn engine khác trong Cài đặt.', 'error');
+            this._showToast('本地 MLX 仅支持 macOS Apple Silicon。请在设置中选择其他引擎。', 'error');
             this._showView('settings');
             return;
         }
 
         // Check Soniox API key only for cloud mode
         if (this.translationMode === 'soniox' && !settings.soniox_api_key) {
-            this._showToast('Soniox API key is required. Add it in Settings.', 'error');
+            this._showToast('需要 Soniox API 密钥。请在设置中添加。', 'error');
             this._showView('settings');
             return;
         }
 
         // Check OpenAI API key for openai mode
         if (this.translationMode === 'openai' && !settings.openai_api_key) {
-            this._showToast('OpenAI API key is required. Add it in Settings.', 'error');
+            this._showToast('需要 OpenAI API 密钥。请在设置中添加。', 'error');
             this._showView('settings');
             return;
         }
 
         // Check Qwen API key for qwen mode
         if (this.translationMode === 'qwen' && !settings.qwen_api_key) {
-            this._showToast('Qwen (DashScope) API key is required. Add it in Settings.', 'error');
+            this._showToast('需要 Qwen（DashScope）API 密钥。请在设置中添加。', 'error');
             this._showView('settings');
             return;
         }
 
         // Check ElevenLabs key only if TTS is enabled AND provider is elevenlabs
         if (this.ttsEnabled && settings.tts_provider === 'elevenlabs' && !settings.elevenlabs_api_key) {
-            this._showToast('TTS is ON but ElevenLabs API key is missing. Add it in Settings or disable TTS.', 'error');
+            this._showToast('语音朗读已开启，但缺少 ElevenLabs API 密钥。请在设置中添加或关闭语音朗读。', 'error');
             this._showView('settings');
             return;
         }
@@ -2336,7 +2348,7 @@ class App {
         this.openAiClient.onClosed = (reason) => {
             console.warn('[OpenAI Realtime] closed:', reason);
             if (this.isRunning) {
-                this._showToast('OpenAI session closed — reconnecting…', 'success');
+                this._showToast('OpenAI 会话已关闭 — 正在重新连接…', 'success');
                 setTimeout(() => {
                     if (this.isRunning) this._startOpenAiMode(settingsManager.get());
                 }, 1000);
@@ -2351,7 +2363,7 @@ class App {
                 audioOutput: false,
             }, this.openAiOutputQueue);
         } catch (err) {
-            this._showToast(`OpenAI connect failed: ${err}`, 'error');
+            this._showToast(`OpenAI 连接失败：${err}`, 'error');
             await this.pause();
             return;
         }
@@ -2375,7 +2387,7 @@ class App {
             console.log('[OpenAI] start_capture invoked OK');
         } catch (err) {
             console.error('Failed to start audio capture:', err);
-            this._showToast(`Audio error: ${err}`, 'error');
+            this._showToast(`音频错误：${err}`, 'error');
             await this.pause();
         }
     }
@@ -2411,7 +2423,7 @@ class App {
         this.qwenClient.onClosed = (reason) => {
             console.warn('[Qwen Realtime] closed:', reason);
             if (this.isRunning) {
-                this._showToast('Qwen session closed — reconnecting…', 'success');
+                this._showToast('Qwen 会话已关闭 — 正在重新连接…', 'success');
                 setTimeout(() => {
                     if (this.isRunning) this._startQwenMode(settingsManager.get());
                 }, 1000);
@@ -2432,7 +2444,7 @@ class App {
                 targetLanguage: settings.target_language,
             });
         } catch (err) {
-            this._showToast(`Qwen connect failed: ${err}`, 'error');
+            this._showToast(`Qwen 连接失败：${err}`, 'error');
             await this.pause();
             return;
         }
@@ -2456,7 +2468,7 @@ class App {
             console.log('[Qwen] start_capture invoked OK');
         } catch (err) {
             console.error('Failed to start audio capture:', err);
-            this._showToast(`Audio error: ${err}`, 'error');
+            this._showToast(`音频错误：${err}`, 'error');
             await this.pause();
         }
     }
@@ -2501,7 +2513,7 @@ class App {
             console.log('[App] Audio capture started successfully');
         } catch (err) {
             console.error('Failed to start audio capture:', err);
-            this._showToast(`Audio error: ${err}`, 'error');
+            this._showToast(`音频错误：${err}`, 'error');
             await this.pause();
         }
     }
@@ -2520,7 +2532,7 @@ class App {
             await invoke('stop_capture');
         } catch (err) {
             console.error('[App] Audio permission check failed:', err);
-            this._showToast(`Audio permission required: ${err}`, 'error');
+            this._showToast(`需要音频权限：${err}`, 'error');
             this.isRunning = false;
             this._updateStartButton();
             this._updateStatus('error');
@@ -2534,8 +2546,8 @@ class App {
             const checkResult = await invoke('check_mlx_setup');
             const status = JSON.parse(checkResult);
             if (!status.ready) {
-                this._showToast('Setting up MLX models (one-time, ~5GB)...', 'success');
-                this.transcriptUI.showStatusMessage('Downloading MLX models (one-time setup)...');
+                this._showToast('正在配置 MLX 模型（仅需一次，约 5GB）…', 'success');
+                this.transcriptUI.showStatusMessage('正在下载 MLX 模型（首次配置）…');
                 await this._runMlxSetup();
             }
         } catch (err) {
@@ -2546,7 +2558,7 @@ class App {
 
         // Step 1: Start pipeline FIRST (independent of audio)
         try {
-            this._showToast('Starting local pipeline...', 'success');
+            this._showToast('正在启动本地处理流程…', 'success');
 
             this.localPipelineChannel = new window.__TAURI__.core.Channel();
             this.localPipelineReady = false;
@@ -2580,7 +2592,7 @@ class App {
             console.log('[App] Local pipeline spawned');
         } catch (err) {
             console.error('Failed to start pipeline:', err);
-            this._showToast(`Pipeline error: ${err}`, 'error');
+            this._showToast(`处理流程错误：${err}`, 'error');
             await this.pause();
             return;
         }
@@ -2609,7 +2621,7 @@ class App {
             console.log('[App] Audio capture started');
         } catch (err) {
             console.error('Audio capture failed (pipeline still running):', err);
-            this._showToast(`Audio: ${err}. Pipeline still loading...`, 'error');
+            this._showToast(`音频：${err}。处理流程仍在加载…`, 'error');
         }
     }
 
@@ -2620,7 +2632,7 @@ class App {
                 this._updateStatus('connected');
                 this.transcriptUI.removeStatusMessage();
                 this.transcriptUI.showListening();
-                this._showToast('Local models ready!', 'success');
+                this._showToast('本地模型已就绪！', 'success');
                 break;
             case 'result':
                 // Chase effect: show original first (gray), then translation (white)
@@ -2639,7 +2651,7 @@ class App {
                 sessionStore.addSegment(data.original || '', data.translated || '');
                 break;
             case 'status':
-                const msg = data.message || 'Loading...';
+                const msg = data.message || '正在加载…';
                 // Status bar: show compact message (strip [pipeline] prefix)
                 const statusText = document.getElementById('status-text');
                 if (statusText) {
@@ -2691,7 +2703,7 @@ class App {
             // Cancel handler
             const onCancel = () => {
                 modal.style.display = 'none';
-                reject(new Error('Setup cancelled'));
+                reject(new Error('配置已取消'));
             };
             cancelBtn.addEventListener('click', onCancel, { once: true });
 
@@ -2705,7 +2717,7 @@ class App {
 
                 switch (data.type) {
                     case 'progress':
-                        statusText.textContent = data.message || 'Working...';
+                        statusText.textContent = data.message || '正在处理…';
 
                         // Update step indicators
                         if (data.step) {
@@ -2735,7 +2747,7 @@ class App {
 
                     case 'complete':
                         updateProgress(100);
-                        statusText.textContent = '✅ ' + (data.message || 'Setup complete!');
+                        statusText.textContent = '✅ ' + (data.message || '配置完成！');
                         ['check', 'venv', 'packages', 'models'].forEach(s => updateStep(s, '✅', false));
 
                         // Close modal after brief delay
@@ -2746,8 +2758,8 @@ class App {
                         break;
 
                     case 'error':
-                        statusText.textContent = '❌ ' + (data.message || 'Setup failed');
-                        cancelBtn.textContent = 'Close';
+                        statusText.textContent = '❌ ' + (data.message || '配置失败');
+                        cancelBtn.textContent = '关闭';
                         cancelBtn.removeEventListener('click', onCancel);
                         cancelBtn.addEventListener('click', () => {
                             modal.style.display = 'none';
@@ -2836,9 +2848,9 @@ class App {
         const result = await sessionStore.persist();
         if (result === 'saved') {
             const n = sessionStore.totalSegmentCount();
-            this._showToast(`Saved ${n} segment${n === 1 ? '' : 's'}`, 'success');
+            this._showToast(`已保存 ${n} 条片段`, 'success');
         } else if (result === 'failed') {
-            this._showToast('Save failed — session kept in memory', 'error');
+            this._showToast('保存失败 — 会话仍保留在内存中', 'error');
         }
         // 'skipped' → data already on disk or nothing to save; no toast.
 
@@ -2853,15 +2865,15 @@ class App {
         if (this.isRunning) await this.pause();
 
         if (sessionStore.isEmpty()) {
-            this._showToast('Nothing to save', 'success');
+            this._showToast('没有可保存的内容', 'success');
         } else {
             const result = await sessionStore.endSession();
             if (result === 'failed') {
                 // Keep the in-memory session intact so the user can retry Stop.
-                this._showToast('Save failed — session kept in memory', 'error');
+                this._showToast('保存失败 — 会话仍保留在内存中', 'error');
                 return;
             }
-            this._showToast('Session saved — next start creates a new one', 'success');
+            this._showToast('会话已保存 — 下次开始时将创建新会话', 'success');
         }
 
         // Reset session identity: fresh ID + current settings so the next Start
@@ -2923,7 +2935,7 @@ class App {
         iconPlay.style.display = this.isRunning ? 'none' : 'block';
         iconStop.style.display = this.isRunning ? 'block' : 'none';
         const label = document.getElementById('btn-start-label');
-        if (label) label.textContent = this.isRunning ? 'Dừng' : 'Bắt đầu';
+        if (label) label.textContent = this.isRunning ? '停止' : '开始';
 
         // Pause is only actionable while running. (Don't also gate on isStarting:
         // start() calls this while isStarting is still true, and the click handler
@@ -2938,7 +2950,7 @@ class App {
         const totalSec = Math.floor(ms / 1000);
         const min = Math.floor(totalSec / 60);
         const sec = totalSec % 60;
-        return `${min}m ${sec}s`;
+        return `${min} 分 ${sec} 秒`;
     }
 
     async _saveTranscriptFile() {
@@ -2965,10 +2977,10 @@ class App {
         try {
             const path = await invoke('save_transcript', { content });
             const filename = path.split('/').pop();
-            this._showToast(`Saved: ${filename}`, 'success');
+            this._showToast(`已保存：${filename}`, 'success');
         } catch (err) {
             console.error('Failed to save transcript:', err);
-            this._showToast('Failed to save transcript', 'error');
+            this._showToast('保存转录内容失败', 'error');
         }
     }
 
@@ -2983,19 +2995,19 @@ class App {
         switch (status) {
             case 'connecting':
                 dot.classList.add('connecting');
-                text.textContent = 'Connecting...';
+                text.textContent = '正在连接…';
                 break;
             case 'connected':
                 dot.classList.add('connected');
-                text.textContent = 'Listening';
+                text.textContent = '正在聆听';
                 break;
             case 'disconnected':
                 dot.classList.add('disconnected');
-                text.textContent = 'Ready';
+                text.textContent = '就绪';
                 break;
             case 'error':
                 dot.classList.add('error');
-                text.textContent = 'Error';
+                text.textContent = '错误';
                 break;
         }
         // Live tab shows a red badge while a session runs so the user sees
@@ -3059,7 +3071,7 @@ class App {
         await this.appWindow.setAlwaysOnTop(this.isPinned);
         const btn = document.getElementById('btn-pin');
         if (btn) btn.classList.toggle('active', this.isPinned);
-        this._showToast(this.isPinned ? 'Pinned on top' : 'Unpinned — window can go behind other apps', 'success');
+        this._showToast(this.isPinned ? '窗口已置顶' : '已取消置顶 — 窗口可被其他应用遮挡', 'success');
     }
 
     // ─── Compact Mode ───────────────────────────────
@@ -3106,14 +3118,14 @@ class App {
         if (viewer) viewer.style.display = 'none';
         if (!listEl) return;
 
-        listEl.innerHTML = '<div class="sessions-loading">Loading...</div>';
+        listEl.innerHTML = '<div class="sessions-loading">正在加载…</div>';
 
         try {
             const cmd = query && query.trim() ? 'search_sessions' : 'list_sessions';
             const args = query && query.trim() ? { query: query.trim() } : {};
             const sessions = await invoke(cmd, args);
             if (sessions.length === 0) {
-                listEl.innerHTML = '<div class="sessions-empty">No saved sessions yet.</div>';
+                listEl.innerHTML = '<div class="sessions-empty">暂无已保存的会话。</div>';
                 return;
             }
 
@@ -3134,37 +3146,37 @@ class App {
                     // Block deleting the active session — the next autosave would
                     // just resurrect the file the user deleted.
                     if (id === sessionStore.id) {
-                        this._showToast('Cannot delete the active session — Stop it first', 'error');
+                        this._showToast('无法删除当前会话 — 请先停止会话', 'error');
                         return;
                     }
-                    if (!confirm('Delete this session permanently?')) return;
+                    if (!confirm('确定要永久删除此会话吗？')) return;
                     try {
                         await invoke('delete_session', { id });
                         await this._showSessions();
                     } catch (err) {
-                        this._showToast(`Delete failed: ${err}`, 'error');
+                        this._showToast(`删除失败：${err}`, 'error');
                     }
                 });
             });
         } catch (err) {
-            listEl.innerHTML = `<div class="sessions-empty">Error: ${err}</div>`;
+            listEl.innerHTML = `<div class="sessions-empty">错误：${err}</div>`;
         }
     }
 
     _renderSessionItem(s) {
-        const title = this._esc(s.title || 'Untitled session');
+        const title = this._esc(s.title || '未命名会话');
         const created = this._esc(s.created_at || '').slice(0, 16);
         const duration = this._formatSeconds(s.duration_sec || 0);
-        const engine = s.engine || 'unknown';
+        const engine = s.engine || '未知';
         const engineBadge = s.has_legacy_only
-            ? `<span class="session-badge badge-legacy">legacy</span>`
+            ? `<span class="session-badge badge-legacy">旧版</span>`
             : `<span class="session-badge badge-engine">${this._esc(engine)}</span>`;
         const langPair = s.source_lang && s.target_lang
             ? `<span class="session-badge">${this._esc(s.source_lang)} → ${this._esc(s.target_lang)}</span>`
             : '';
-        const segCount = s.segment_count > 0 ? `<span class="session-meta-dim">${s.segment_count} segments</span>` : '';
-        const chunks = s.chunk_count > 1 ? `<span class="session-meta-dim">${s.chunk_count} chunks</span>` : '';
-        const delBtn = `<button class="session-delete-btn" title="Delete" data-id="${this._escAttr(s.id)}">×</button>`;
+        const segCount = s.segment_count > 0 ? `<span class="session-meta-dim">${s.segment_count} 条片段</span>` : '';
+        const chunks = s.chunk_count > 1 ? `<span class="session-meta-dim">${s.chunk_count} 个录制段</span>` : '';
+        const delBtn = `<button class="session-delete-btn" title="删除" data-id="${this._escAttr(s.id)}">×</button>`;
         return `<div class="session-item" data-id="${this._escAttr(s.id)}" data-legacy="${s.has_legacy_only ? '1' : '0'}">
             <div class="session-item-row1">
                 <span class="session-item-title">${title}</span>
@@ -3190,7 +3202,7 @@ class App {
         if (listPanel) listPanel.style.display = 'none';
         if (viewer) viewer.style.display = '';
         if (title) title.textContent = id;
-        if (content) content.textContent = 'Loading...';
+        if (content) content.textContent = '正在加载…';
         this._currentViewedSession = { id, isLegacy };
 
         try {
@@ -3204,7 +3216,7 @@ class App {
                 if (title) title.textContent = result.json.title || id;
             }
         } catch (err) {
-            if (content) content.textContent = `Error loading session: ${err}`;
+            if (content) content.textContent = `加载会话失败：${err}`;
         }
     }
 
@@ -3212,15 +3224,15 @@ class App {
         if (!sec) return '';
         const h = Math.floor(sec / 3600);
         const m = Math.floor((sec % 3600) / 60);
-        if (h > 0) return `${h}h ${m}m`;
-        if (m > 0) return `${m}m`;
-        return `${sec}s`;
+        if (h > 0) return `${h} 小时 ${m} 分`;
+        if (m > 0) return `${m} 分`;
+        return `${sec} 秒`;
     }
 
     async _exportCurrentSession(format) {
         const cur = this._currentViewedSession;
         if (!cur || cur.isLegacy) {
-            this._showToast('Cannot export legacy sessions', 'error');
+            this._showToast('无法导出旧版会话', 'error');
             return;
         }
         try {
@@ -3235,9 +3247,9 @@ class App {
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
-            this._showToast(`Exported .${format}`, 'success');
+            this._showToast(`已导出为 .${format}`, 'success');
         } catch (err) {
-            this._showToast(`Export failed: ${err}`, 'error');
+            this._showToast(`导出失败：${err}`, 'error');
         }
     }
 
@@ -3247,21 +3259,21 @@ class App {
         };
         updater.onError = (err) => {
             const statusText = document.getElementById('update-status-text');
-            if (statusText) statusText.textContent = `⚠️ Check failed: ${err.message || err}`;
+            if (statusText) statusText.textContent = `⚠️ 检查失败：${err.message || err}`;
         };
         updater.onCheckComplete = (hasUpdate) => {
             const checkBtn = document.getElementById('btn-check-update');
             if (checkBtn) checkBtn.classList.remove('spinning');
             if (!hasUpdate && !this._pendingUpdateVersion) {
                 const statusText = document.getElementById('update-status-text');
-                if (statusText) statusText.textContent = '✅ App is up to date';
+                if (statusText) statusText.textContent = '✅ 当前已是最新版本';
             }
         };
         // Delay check slightly so app finishes loading first
         setTimeout(() => {
             const statusText = document.getElementById('update-status-text');
             const checkBtn = document.getElementById('btn-check-update');
-            if (statusText) statusText.textContent = 'Checking for updates...';
+            if (statusText) statusText.textContent = '正在检查更新…';
             if (checkBtn) checkBtn.classList.add('spinning');
             updater.checkForUpdates();
         }, 3000);
@@ -3270,7 +3282,7 @@ class App {
     _triggerUpdateCheck() {
         const statusText = document.getElementById('update-status-text');
         const checkBtn = document.getElementById('btn-check-update');
-        if (statusText) statusText.textContent = 'Checking for updates...';
+        if (statusText) statusText.textContent = '正在检查更新…';
         if (checkBtn) checkBtn.classList.add('spinning');
         updater.checkForUpdates();
     }
@@ -3287,7 +3299,7 @@ class App {
         const statusText = document.getElementById('update-status-text');
         const actions = document.getElementById('update-actions');
         if (statusEl) statusEl.classList.add('has-update');
-        if (statusText) statusText.textContent = `🆕 Update v${version} available`;
+        if (statusText) statusText.textContent = `🆕 发现新版本 v${version}`;
         if (actions) actions.style.display = '';
 
         // 3. Show subtle hint on main screen
@@ -3295,7 +3307,7 @@ class App {
         if (existing) existing.remove();
         const hint = document.createElement('div');
         hint.className = 'update-hint';
-        hint.textContent = `Update v${version} available — go to Settings → About`;
+        hint.textContent = `发现新版本 v${version} — 请前往“设置 → 关于”`;
         hint.addEventListener('click', () => {
             this._showView('settings');
             this._showSettingsScreen('tab-about');
@@ -3332,7 +3344,7 @@ class App {
             const progressPct = document.getElementById('update-progress-pct');
 
             if (btn) btn.disabled = true;
-            if (btnText) btnText.textContent = 'Downloading...';
+            if (btnText) btnText.textContent = '正在下载…';
             if (progressDiv) progressDiv.style.display = '';
 
             try {
@@ -3341,11 +3353,11 @@ class App {
                         const pct = Math.round((downloaded / total) * 100);
                         if (progressFill) progressFill.style.width = `${pct}%`;
                         if (progressPct) progressPct.textContent = `${pct}%`;
-                        if (btnText) btnText.textContent = `Downloading ${pct}%...`;
+                        if (btnText) btnText.textContent = `正在下载 ${pct}%…`;
                     }
                 });
                 // Install succeeded! Try to restart
-                if (btnText) btnText.textContent = 'Restarting...';
+                if (btnText) btnText.textContent = '正在重启…';
                 try {
                     const relaunch = window.__TAURI__?.process?.relaunch;
                     if (relaunch) {
@@ -3357,16 +3369,16 @@ class App {
                 } catch (restartErr) {
                     // Restart failed (e.g. process plugin not available) but update IS installed
                     console.warn('[Update] Restart failed, update is installed:', restartErr);
-                    if (btnText) btnText.textContent = '✅ Updated! Restart app';
+                    if (btnText) btnText.textContent = '✅ 更新完成！请重启应用';
                     const statusText = document.getElementById('update-status-text');
-                    if (statusText) statusText.textContent = '✅ Update installed — close and reopen the app';
+                    if (statusText) statusText.textContent = '✅ 更新已安装 — 请关闭并重新打开应用';
                     if (btn) btn.disabled = true;
                 }
             } catch (err) {
                 const errMsg = err?.message || String(err);
-                if (btnText) btnText.textContent = 'Failed — try again';
+                if (btnText) btnText.textContent = '失败 — 请重试';
                 const statusText = document.getElementById('update-status-text');
-                if (statusText) statusText.textContent = `⚠️ Install error: ${errMsg}`;
+                if (statusText) statusText.textContent = `⚠️ 安装错误：${errMsg}`;
                 if (btn) btn.disabled = false;
                 console.error('[Update]', err);
             }

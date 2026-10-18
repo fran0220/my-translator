@@ -218,7 +218,7 @@ export class SessionStore {
                 }
             }
         }
-        return 'Untitled session';
+        return '未命名会话';
     }
 
     // End time of an open (ended_at: null) chunk, derived from its last segment's
@@ -275,9 +275,9 @@ export class SessionStore {
         const h = Math.floor(sec / 3600);
         const m = Math.floor((sec % 3600) / 60);
         const s = sec % 60;
-        if (h > 0) return `${h}h ${m}m`;
-        if (m > 0) return `${m}m ${s}s`;
-        return `${s}s`;
+        if (h > 0) return `${h} 小时 ${m} 分`;
+        if (m > 0) return `${m} 分 ${s} 秒`;
+        return `${s} 秒`;
     }
 
     _toMarkdown() {
@@ -288,7 +288,7 @@ export class SessionStore {
 
         lines.push(`# ${title}`);
         lines.push('');
-        lines.push(`**Engine**: ${this.engine || 'unknown'} · ${langPair} · ${this._formatDateTime(this.createdAt)} · ${dur}`);
+        lines.push(`**引擎**：${this.engine || '未知'} · ${langPair} · ${this._formatDateTime(this.createdAt)} · ${dur}`);
         lines.push('');
 
         const all = this._allChunks();
@@ -300,12 +300,12 @@ export class SessionStore {
                 const gapMin = Math.max(0, Math.round((curStart - prevEnd) / 60000));
                 const startStr = this._formatDateTime(chunk.started_at).slice(11);
                 lines.push('');
-                lines.push(`──── resumed at ${startStr} (after ${gapMin}m) ────`);
+                lines.push(`──── 于 ${startStr} 继续（间隔 ${gapMin} 分钟）────`);
                 lines.push('');
             }
             const startStr = this._formatDateTime(chunk.started_at).slice(11);
             const endStr = chunk.ended_at ? this._formatDateTime(chunk.ended_at).slice(11) : '...';
-            lines.push(`## Chunk ${i + 1} — ${startStr} – ${endStr}`);
+            lines.push(`## 录制段 ${i + 1} — ${startStr} – ${endStr}`);
             lines.push('');
             for (const seg of chunk.segments) {
                 if (seg.src) {

@@ -33,6 +33,11 @@ pub struct Settings {
     pub source_language: String,
     /// Target language: ISO 639-1 code
     pub target_language: String,
+    pub translation_type: String,
+    pub language_a: String,
+    pub language_b: String,
+    pub language_hints_strict: bool,
+    pub endpoint_delay: u32,
     /// Audio source: "system" | "microphone" | "both"
     pub audio_source: String,
     /// Overlay opacity: 0.0 - 1.0
@@ -110,8 +115,13 @@ impl Default for Settings {
             soniox_api_key: String::new(),
             openai_api_key: String::new(),
             qwen_api_key: String::new(),
-            source_language: "auto".to_string(),
-            target_language: "vi".to_string(),
+            source_language: "en".to_string(),
+            target_language: "zh".to_string(),
+            translation_type: "one_way".to_string(),
+            language_a: "en".to_string(),
+            language_b: "zh".to_string(),
+            language_hints_strict: false,
+            endpoint_delay: 3000,
             audio_source: "system".to_string(),
             overlay_opacity: 0.85,
             font_size: 16,

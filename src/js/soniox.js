@@ -480,13 +480,13 @@ export class SonioxClient {
 
         let userMessage = message;
         if (code === 401) {
-            userMessage = '❌ Invalid API key. Please check your key in Settings.';
+            userMessage = '❌ API 密钥无效，请在设置中检查。';
         } else if (code === 429) {
-            userMessage = '⏳ Rate limit exceeded. Please wait a moment.';
+            userMessage = '⏳ 请求超过限额，请稍后重试。';
         } else if (code === 402) {
-            userMessage = '💳 Insufficient credits. Check your Soniox account.';
+            userMessage = '💳 余额不足，请检查 Soniox 账户。';
         } else if (code === 400) {
-            userMessage = `⚙️ Config error: ${message}`;
+            userMessage = `⚙️ 配置错误：${message}`;
         }
 
         this._setStatus('error');
@@ -496,7 +496,7 @@ export class SonioxClient {
     _tryReconnect(reason) {
         if (this._reconnectAttempts >= MAX_RECONNECT) {
             this._setStatus('error');
-            this.onError?.(`${reason}. Reconnect failed after ${MAX_RECONNECT} attempts.`);
+            this.onError?.(`已重试 ${MAX_RECONNECT} 次，仍无法连接：${reason}`);
             return;
         }
 
@@ -505,7 +505,7 @@ export class SonioxClient {
 
         console.log(`Reconnecting (${this._reconnectAttempts}/${MAX_RECONNECT}) in ${delay}ms...`);
         this._setStatus('connecting');
-        this.onError?.(`${reason}. Reconnecting (${this._reconnectAttempts}/${MAX_RECONNECT})...`);
+        this.onError?.(`正在重连（${this._reconnectAttempts}/${MAX_RECONNECT}）：${reason}`);
 
         setTimeout(() => {
             if (!this._intentionalDisconnect && this._config) {
