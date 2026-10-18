@@ -71,8 +71,6 @@ pub fn run() {
         .setup(|app| {
             #[cfg(desktop)]
             {
-                app.handle()
-                    .plugin(tauri_plugin_updater::Builder::new().build())?;
                 app.handle().plugin(tauri_plugin_process::init())?;
             }
             // Dev builds (compiled with the `devtools` feature): auto-open the WebView

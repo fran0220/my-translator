@@ -31,6 +31,14 @@ jobs:
         working-directory: src-tauri
         run: cargo test --release --lib settings::tests
 
+      - name: Windows startup smoke test
+        shell: pwsh
+        run: |
+          $app = Start-Process -FilePath src-tauri/target/release/my-translator.exe -PassThru
+          Start-Sleep -Seconds 12
+          if ($app.HasExited) { throw "Application exited during startup: $($app.ExitCode)" }
+          Stop-Process -Id $app.Id
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:

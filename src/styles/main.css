@@ -464,6 +464,13 @@ body {
   -webkit-app-region: no-drag;
 }
 
+#btn-broadcast {
+  width: auto;
+  flex-shrink: 0;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
 .action-btn:hover {
   background: var(--accent-hover);
   box-shadow: 0 0 12px var(--accent-glow);
