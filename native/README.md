@@ -90,7 +90,26 @@ OpenAI/Soniox/千问收尾分别限时 3/5/15 秒；会话线程另有 16 秒网
 普通构建的预置 JSON 永远为 `{}`，不读取环境中的 API key 或 `.env`。
 显式 `--features private-team` 才允许构建脚本读取团队构建环境；本次未运行此模式。
 敏感值只写入受限权限的 `OUT_DIR`，不打印到 Cargo 指令或日志，也不写入源码。
-私有程序本身包含可提取凭据，不能公开分发。普通运行仍沿用现有本机设置文件，不能分享此文件。
+私有程序本身包含可提取凭据，不能公开分发。不能分享任何含密钥的本机设置文件。
+
+原生版默认使用操作系统配置根目录下的 `com.personal.translator.native/settings.json`，
+不会读取、迁移或修改 Tauri 的 `com.personal.translator` 配置。私有原生版在同一个原生目录下
+使用 `settings-team.json`，也不继承 Tauri 私有配置。
+
+原生独有的 `TRANSLATOR_NATIVE_CONFIG_DIR` 可显式指定配置目录，必须为**非空绝对路径**。
+目录可尚不存在，首次保存时创建；只在启动时解析一次，读取和保存始终指向同一位置。
+Windows 示例（不要复制旧 Tauri 配置或密钥）：
+
+```powershell
+$env:TRANSLATOR_NATIVE_CONFIG_DIR = 'C:\translator-native-test-config'
+.\native\target\release\translator-native.exe
+```
+
+非法覆盖、路径不是目录、不可读或损坏的配置都会显示错误并禁止开始与保存，
+不会回落到其他目录，也不会用默认配置覆盖坏文件；修复目录/文件后重启。
+保存前会再次检查已有文件，使用同目录临时文件替换，避免写入失败截断原文件。
+`--replay` 完全跳过配置路径解析、读取和保存，即使覆盖变量非法也能进行离线回放。
+Tauri 的 `Settings::load/save` API、默认目录和容错行为不变。
 
 ## 验证边界
 

@@ -11,7 +11,7 @@ use gpui_kit::{
 use std::time::Duration;
 use translator_native::{
     session::{Event, Session},
-    settings::Settings,
+    settings::{NativeSettingsStore, Settings},
     transcript::Transcript,
 };
 
@@ -22,6 +22,8 @@ struct LiveState {
 
 struct Translator {
     settings: Settings,
+    config_store: Option<NativeSettingsStore>,
+    config_error: Option<String>,
     keys: [Entity<InputState>; 3],
     proxy: Entity<InputState>,
     token: Entity<InputState>,
@@ -45,10 +47,13 @@ impl Translator {
         cx: &mut Context<Self>,
     ) -> Self {
         // Offline replay never loads saved credentials or opens a provider connection.
-        let settings = if replay.is_some() {
-            Settings::default()
+        let (settings, config_store, config_error) = if replay.is_some() {
+            (Settings::default(), None, None)
         } else {
-            Settings::load()
+            match NativeSettingsStore::open() {
+                Ok((store, settings)) => (settings, Some(store), None),
+                Err(error) => (Settings::default(), None, Some(error)),
+            }
         };
         let input = |value: String, secret: bool, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| {
@@ -81,15 +86,23 @@ impl Translator {
         })
         .detach();
         let offline = replay.is_some();
+        let status = if config_error.is_some() {
+            "配置不可用 · 请修正后重启"
+        } else {
+            "就绪 · 原生界面，无需 WebView2"
+        }
+        .into();
         Self {
             settings,
+            config_store,
+            config_error,
             keys,
             proxy,
             token,
             state,
             session: None,
             broadcast: None,
-            status: "就绪 · 原生界面，无需 WebView2".into(),
+            status,
             settings_open: false,
             failover: true,
             stopping: false,
@@ -158,12 +171,23 @@ impl Translator {
         if self.offline {
             return Err("离线回放不保存设置，也不会连接服务商".into());
         }
+        if let Some(error) = &self.config_error {
+            return Err(error.clone());
+        }
         self.settings.soniox_api_key = self.keys[0].read(cx).value().to_string();
         self.settings.openai_api_key = self.keys[1].read(cx).value().to_string();
         self.settings.qwen_api_key = self.keys[2].read(cx).value().to_string();
         self.settings.realtime_proxy_url = self.proxy.read(cx).value().trim().to_owned();
         self.settings.realtime_proxy_token = self.token.read(cx).value().trim().to_owned();
-        self.settings.save()
+        let result = self
+            .config_store
+            .as_ref()
+            .ok_or("原生配置未初始化")?
+            .save(&self.settings);
+        if let Err(error) = &result {
+            self.config_error = Some(error.clone());
+        }
+        result
     }
 
     fn toggle(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -355,7 +379,7 @@ impl Translator {
             .child("实时中转地址（仅 Soniox / OpenAI；留空直连）").child(Input::new(&self.proxy))
             .child("团队中转令牌").child(Input::new(&self.token))
             .child(div().text_sm().text_color(rgb(0x9ca3af)).child("普通版本不含凭据。密钥在本机设置中保存；请勿分享设置文件。会话中修改的配置在下次开始时生效。"))
-            .child(Button::new("save").primary().label("保存设置").on_click(cx.listener(|this, _, _, cx| {
+            .child(Button::new("save").primary().label("保存设置").disabled(self.offline || self.config_error.is_some()).on_click(cx.listener(|this, _, _, cx| {
                 this.status = match this.save(cx) { Ok(()) => "设置已保存".into(), Err(e) => e }; cx.notify();
             })))
     }
@@ -420,7 +444,11 @@ impl Render for Translator {
                             } else {
                                 "开始翻译"
                             })
-                            .disabled(self.stopping)
+                            .disabled(
+                                self.stopping
+                                    || (self.session.is_none()
+                                        && (self.offline || self.config_error.is_some())),
+                            )
                             .on_click(cx.listener(Self::toggle)),
                     )
                     .child(
@@ -435,6 +463,13 @@ impl Render for Translator {
                     .text_color(rgb(0xa5b4fc))
                     .child(self.status.clone()),
             )
+            .when_some(self.config_error.clone(), |view, error| {
+                view.child(
+                    div()
+                        .text_color(rgb(0xfca5a5))
+                        .child(format!("配置错误：{error}。开始与保存已禁用。")),
+                )
+            })
             .child(
                 div()
                     .flex_1()
