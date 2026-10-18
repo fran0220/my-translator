@@ -94,27 +94,42 @@ fn request(settings: &Settings) -> Result<http::Request<()>, String> {
     Ok(request)
 }
 
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn connect(settings: Settings, context: String) -> Result<Socket, String> {
+    let (mut socket, _) =
+        tokio::time::timeout(Duration::from_secs(15), connect_async(request(&settings)?))
+            .await
+            .map_err(|_| "Soniox 连接超时")?
+            .map_err(|_| "Soniox 连接失败，请检查密钥和网络")?;
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        socket.send(Message::Text(
+            configuration(&settings, &context).to_string().into(),
+        )),
+    )
+    .await
+    .map_err(|_| "Soniox 配置发送超时")?
+    .map_err(|_| "Soniox 配置发送失败")?;
+    Ok(socket)
+}
+
 pub async fn run(
     settings: Settings,
     mut audio: mpsc::Receiver<Vec<u8>>,
     mut stop: mpsc::Receiver<()>,
     events: Sender<Event>,
 ) -> Result<(), String> {
-    let request = request(&settings)?;
-    let (mut socket, _) = tokio::select! {
+    let mut socket = tokio::select! {
         _ = stop.recv() => return Ok(()),
-        result = tokio::time::timeout(Duration::from_secs(15), connect_async(request)) => {
-            result.map_err(|_| "Soniox 连接超时")?.map_err(|_| "Soniox 连接失败，请检查密钥和网络")?
-        }
+        result = connect(settings.clone(), String::new()) => result?,
     };
-    socket
-        .send(Message::Text(
-            configuration(&settings, "").to_string().into(),
-        ))
-        .await
-        .map_err(|_| "Soniox 配置发送失败")?;
     let _ = events.send(Event::Ready);
     let mut keepalive = tokio::time::interval(Duration::from_secs(5));
+    let mut rotate_at = tokio::time::Instant::now() + Duration::from_secs(180);
+    let mut history = String::new();
+    let mut replacement = None;
     let mut closing = false;
     let mut deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
@@ -122,6 +137,7 @@ pub async fn run(
             biased;
             _ = stop.recv(), if !closing => {
                 closing = true;
+                replacement = None;
                 audio.close(); while audio.try_recv().is_ok() {}
                 deadline = tokio::time::Instant::now() + Duration::from_secs(5);
                 tokio::time::timeout_at(deadline, socket.send(Message::Binary(Vec::new().into()))).await.map_err(|_| "Soniox 收尾超时")?.map_err(|_| "Soniox 收尾失败")?;
@@ -132,6 +148,16 @@ pub async fn run(
                     let value: Value = serde_json::from_str(&text).map_err(|_| "Soniox 响应格式错误")?;
                     if value.get("error_code").is_some() { return Err("Soniox 服务返回错误，请检查密钥、额度和设置".into()); }
                     let finished = value["finished"] == true;
+                    if let Some(tokens) = value["tokens"].as_array() {
+                        for token in tokens {
+                            if token["is_final"] == true && token["translation_status"] == "translation" {
+                                let text = token["text"].as_str().unwrap_or_default();
+                                if text != "<end>" { history.push_str(text); }
+                            }
+                        }
+                        let length = history.chars().count();
+                        if length > 1500 { history = history.chars().skip(length - 1500).collect(); }
+                    }
                     let _ = events.send(Event::Text(value));
                     if finished { return if closing { Ok(()) } else { Err("Soniox 会话已结束".into()) }; }
                 }
@@ -139,6 +165,20 @@ pub async fn run(
                 Some(Err(_)) => return Err("Soniox 网络连接中断".into()),
                 _ => {}
             },
+            _ = tokio::time::sleep_until(rotate_at), if !closing && replacement.is_none() => {
+                // Make-before-break: capture and the old socket continue while the replacement connects.
+                replacement = Some(Box::pin(connect(settings.clone(), history.clone())));
+            }
+            result = async { replacement.as_mut().unwrap().await }, if replacement.is_some() => {
+                let next = result?;
+                replacement = None;
+                let mut old = std::mem::replace(&mut socket, next);
+                let _ = tokio::time::timeout(Duration::from_millis(100), async {
+                    let _ = old.send(Message::Binary(Vec::new().into())).await;
+                    let _ = old.close(None).await;
+                }).await;
+                rotate_at = tokio::time::Instant::now() + Duration::from_secs(180);
+            }
             _ = keepalive.tick(), if !closing => {
                 tokio::time::timeout(Duration::from_secs(3), socket.send(Message::Text(json!({"type":"keepalive"}).to_string().into()))).await.map_err(|_| "Soniox 网络超时")?.map_err(|_| "Soniox 网络中断")?;
             }

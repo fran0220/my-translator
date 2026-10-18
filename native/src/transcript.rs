@@ -1,8 +1,9 @@
 //! Provider semantics ported from soniox.js, openai-realtime-client.js and
 //! qwen-realtime-client.js. Deltas append; snapshots replace; finals are authoritative.
 use crate::{openai::OpenAiEvent, qwen::QwenEvent};
+use indexmap::IndexMap;
 use serde_json::Value;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct Segment {
@@ -23,8 +24,8 @@ pub struct Transcript {
     pub source: String,
     pub target: String,
     pending_sources: VecDeque<String>,
-    sources: BTreeMap<String, Item>,
-    targets: BTreeMap<String, Item>,
+    sources: IndexMap<String, Item>,
+    targets: IndexMap<String, Item>,
     completed: VecDeque<String>,
     soniox_source: String,
     soniox_target: String,
@@ -143,8 +144,8 @@ impl Transcript {
             .map(|(id, _)| id.clone())
             .collect();
         for id in ready {
-            let target = self.targets.remove(&id).unwrap();
-            let source = self.sources.remove(&target.source_id).unwrap();
+            let target = self.targets.shift_remove(&id).unwrap();
+            let source = self.sources.shift_remove(&target.source_id).unwrap();
             self.commit(source.text, target.text);
             self.completed.extend([target.source_id, id]);
         }
@@ -192,7 +193,10 @@ impl Transcript {
     pub fn finish(&mut self) {
         if !self.targets.is_empty() || !self.sources.is_empty() {
             for (_, target) in std::mem::take(&mut self.targets) {
-                let source = self.sources.remove(&target.source_id).unwrap_or_default();
+                let source = self
+                    .sources
+                    .shift_remove(&target.source_id)
+                    .unwrap_or_default();
                 self.commit(source.text, target.text);
             }
             for (_, source) in std::mem::take(&mut self.sources) {
@@ -292,6 +296,15 @@ mod tests {
         assert_eq!(t.segments[1].target, "第一");
         t.finish();
         assert_eq!(t.segments.len(), 2);
+        for (id, delta) in [("z-first", "先"), ("a-second", "后")] {
+            t.qwen(QwenEvent::Realtime {
+                event: json!({"type":"response.text.delta","item_id":id,"delta":delta}),
+            });
+        }
+        assert_eq!(t.target, "先后");
+        t.finish();
+        assert_eq!(t.segments[2].target, "先");
+        assert_eq!(t.segments[3].target, "后");
     }
     #[test]
     fn soniox_provisional_revisions_do_not_duplicate_final_tokens() {

@@ -1,0 +1,4 @@
+{"tokens":[{"text":"Original text must never appear in the broadcast window.","translation_status":"original","is_final":true},{"text":"第一段：这是原生导播字幕，显示最新的翻译内容。","translation_status":"translation","is_final":true},{"text":"<end>","is_final":true}]}
+{"tokens":[{"text":"第二段：当一句话超过窗口宽度时，会按实际字体和窗口宽度自动换行。不能按句子数量或字符数量假装限制三行。","translation_status":"translation","is_final":true},{"text":"<end>","is_final":true}]}
+{"tokens":[{"text":"Third paragraph: English and 中文 can share a visual line. Older wrapped lines must scroll out of view as the latest translation arrives.","translation_status":"translation","is_final":true},{"text":"<end>","is_final":true}]}
+{"tokens":[{"text":"最后一段：这里保留最新的三行视觉内容，纯黑背景、白色文字，没有原文、状态栏或者多余的控件。调整窗口宽度和字号以后，仍然最多显示三行完整的文字。","translation_status":"translation","is_final":true},{"text":"<end>","is_final":true}]}

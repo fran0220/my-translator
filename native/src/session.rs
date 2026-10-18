@@ -121,12 +121,15 @@ impl Capture {
         }
         Ok(capture)
     }
-}
-impl Drop for Capture {
-    fn drop(&mut self) {
+    fn stop(&mut self) {
         self.mic.stop();
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         self.system.stop();
+    }
+}
+impl Drop for Capture {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -295,7 +298,7 @@ fn run(
     stop: Arc<AtomicBool>,
     tx: &mpsc::Sender<Event>,
 ) -> Result<(), String> {
-    let capture = Capture::start(&settings.audio_source)?;
+    let mut capture = Capture::start(&settings.audio_source)?;
     // At most two attempts per configured provider. A stop always wins over failover.
     for (attempt, name) in providers
         .iter()
@@ -315,7 +318,7 @@ fn run(
             }
         )));
         let (mut transport, mut task) = Transport::start(name, &settings, &runtime)?;
-        let mut buffer = Vec::new();
+        let mut inputs = vec![Vec::new(); capture.inputs.len()];
         let mut flush = Instant::now();
         let mut stopping = None;
         let mut error = None;
@@ -325,6 +328,7 @@ fn run(
                 break;
             }
             if stop.load(Ordering::SeqCst) && stopping.is_none() {
+                capture.stop();
                 transport.stop();
                 stopping = Some(Instant::now());
                 let _ = tx.send(Event::Status("正在停止，等待尾句…".into()));
@@ -333,18 +337,28 @@ fn run(
                 task.abort();
                 break;
             }
-            for input in &capture.inputs {
-                // Always drain capture while stopping; do not queue abandoned PCM.
-                for pcm in input.try_iter().take(100) {
-                    if stopping.is_none() {
-                        buffer.extend(pcm);
+            for (index, input) in capture.inputs.iter().enumerate() {
+                if stopping.is_some() {
+                    continue;
+                }
+                for _ in 0..100 {
+                    match input.try_recv() {
+                        Ok(pcm) => inputs[index].extend(pcm),
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            return Err("音频设备已断开或无法采集，请检查设备权限".into());
+                        }
                     }
                 }
             }
             if stopping.is_none()
                 && flush.elapsed() >= Duration::from_millis(200)
-                && !buffer.is_empty()
+                && inputs.iter().any(|input| !input.is_empty())
             {
+                let mut buffer = mix_pcm(&inputs);
+                for input in &mut inputs {
+                    input.clear();
+                }
                 // Keep exact 200 ms blocks so OpenAI/Soniox packet limits also bound bytes.
                 while !buffer.is_empty() {
                     let rest = buffer.split_off(buffer.len().min(6400));
@@ -393,9 +407,38 @@ fn run(
     Err("所有已配置服务均不可用，请检查网络、密钥或代理后重试".into())
 }
 
+/// Mix simultaneous PCM streams on the same timeline, rather than concatenating
+/// system/microphone packets (which doubles their apparent duration).
+fn mix_pcm(inputs: &[Vec<u8>]) -> Vec<u8> {
+    let length = inputs.iter().map(Vec::len).max().unwrap_or_default() / 2;
+    (0..length)
+        .flat_map(|index| {
+            let sum: i32 = inputs
+                .iter()
+                .map(|input| {
+                    input
+                        .get(index * 2..index * 2 + 2)
+                        .map(|b| i16::from_le_bytes([b[0], b[1]]) as i32)
+                        .unwrap_or(0)
+                })
+                .sum();
+            (sum.clamp(i16::MIN as i32, i16::MAX as i32) as i16).to_le_bytes()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn concurrent_sources_mix_without_doubling_duration_or_overflowing() {
+        let pcm = |v: &[i16]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+        assert_eq!(
+            mix_pcm(&[pcm(&[100, 30000, -30000]), pcm(&[-50, 10000, -10000])]),
+            pcm(&[50, 32767, -32768])
+        );
+        assert_eq!(mix_pcm(&[pcm(&[123, 456]), vec![]]), pcm(&[123, 456]));
+    }
     #[test]
     fn failover_does_not_silently_change_two_way_semantics() {
         let mut s = Settings::default();
