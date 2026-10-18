@@ -204,13 +204,16 @@ impl Translator {
                     cx,
                 ))),
                 titlebar: None,
+                window_decorations: Some(WindowDecorations::Client),
                 ..Default::default()
             },
             cx,
-            move |_, cx| {
+            move |window, cx| {
                 cx.new(|cx| {
                     cx.observe(&state, |_, _, cx| cx.notify()).detach();
-                    Broadcast { state }
+                    let focus = cx.focus_handle();
+                    window.focus(&focus, cx);
+                    Broadcast { state, focus }
                 })
             },
         );
@@ -234,7 +237,11 @@ impl Translator {
                             Button::new(value)
                                 .label(label)
                                 .selected(self.settings.translation_mode == value)
-                                .disabled(disabled)
+                                .disabled(
+                                    disabled
+                                        || (self.settings.translation_type == "two_way"
+                                            && value != "soniox"),
+                                )
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.settings.translation_mode = value.into();
                                     cx.notify();
@@ -502,62 +509,79 @@ impl Render for Translator {
 
 struct Broadcast {
     state: Entity<LiveState>,
+    focus: FocusHandle,
 }
 impl Render for Broadcast {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
-        let text: SharedString = state.transcript.translation().into();
+        // Earlier logical lines cannot appear among the last three visual lines.
+        // Keep wrapping the complete final lines, including arbitrarily long sentences.
+        let translated = state.transcript.translation();
+        let tail: Vec<_> = translated.lines().rev().take(3).collect();
+        let text: SharedString = tail.into_iter().rev().collect::<Vec<_>>().join("\n").into();
         let font_size = state.font_size;
-        div().size_full().bg(rgb(0x000000)).p_4().child(
-            canvas(
-                move |bounds, window, _| {
-                    let run = TextRun {
-                        len: text.len(),
-                        font: font("sans-serif"),
-                        color: rgb(0xffffff).into(),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    };
-                    window
-                        .text_system()
-                        .shape_text(text, px(font_size), &[run], Some(bounds.size.width), None)
-                        .unwrap_or_default()
-                },
-                move |bounds, lines, window, cx| {
-                    let line_height = px(font_size * 1.4);
-                    let count: usize = lines
-                        .iter()
-                        .map(|line| line.wrap_boundaries.len() + 1)
-                        .sum();
-                    let visible =
-                        3usize.min((bounds.size.height / line_height).floor().max(0.) as usize);
-                    let height = line_height * visible as f32;
-                    let clip = Bounds::new(
-                        point(bounds.origin.x, bounds.bottom() - height),
-                        size(bounds.size.width, height),
-                    );
-                    let mut origin = point(
-                        bounds.origin.x,
-                        bounds.bottom() - line_height * count as f32,
-                    );
-                    window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-                        for line in lines {
-                            let _ = line.paint(
-                                origin,
-                                line_height,
-                                TextAlign::Left,
-                                Some(bounds),
-                                window,
-                                cx,
-                            );
-                            origin.y += line_height * (line.wrap_boundaries.len() + 1) as f32;
-                        }
-                    });
-                },
+        div()
+            .id("broadcast")
+            .track_focus(&self.focus)
+            .size_full()
+            .bg(rgb(0x000000))
+            .p_4()
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            .on_key_down(|event, window, _| match event.keystroke.key.as_str() {
+                "escape" => window.remove_window(),
+                "f11" => window.toggle_fullscreen(),
+                _ => {}
+            })
+            .child(
+                canvas(
+                    move |bounds, window, _| {
+                        let run = TextRun {
+                            len: text.len(),
+                            font: font("sans-serif"),
+                            color: rgb(0xffffff).into(),
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        };
+                        window
+                            .text_system()
+                            .shape_text(text, px(font_size), &[run], Some(bounds.size.width), None)
+                            .unwrap_or_default()
+                    },
+                    move |bounds, lines, window, cx| {
+                        let line_height = px(font_size * 1.4);
+                        let count: usize = lines
+                            .iter()
+                            .map(|line| line.wrap_boundaries.len() + 1)
+                            .sum();
+                        let visible =
+                            3usize.min((bounds.size.height / line_height).floor().max(0.) as usize);
+                        let height = line_height * visible as f32;
+                        let clip = Bounds::new(
+                            point(bounds.origin.x, bounds.bottom() - height),
+                            size(bounds.size.width, height),
+                        );
+                        let mut origin = point(
+                            bounds.origin.x,
+                            bounds.bottom() - line_height * count as f32,
+                        );
+                        window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                            for line in lines {
+                                let _ = line.paint(
+                                    origin,
+                                    line_height,
+                                    TextAlign::Left,
+                                    Some(bounds),
+                                    window,
+                                    cx,
+                                );
+                                origin.y += line_height * (line.wrap_boundaries.len() + 1) as f32;
+                            }
+                        });
+                    },
+                )
+                .size_full(),
             )
-            .size_full(),
-        )
     }
 }
 
