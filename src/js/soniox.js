@@ -13,6 +13,8 @@
  * - Confidence score pass-through
  */
 
+import { getRealtimeProxy } from './realtime-proxy.js';
+
 const SONIOX_ENDPOINT = 'wss://stt-rt.soniox.com/transcribe-websocket';
 
 // Reconnect settings
@@ -76,11 +78,12 @@ export class SonioxClient {
                 endpointDelay } = config;
 
         this._setStatus('connecting');
-        console.log('[Soniox] Connecting to', SONIOX_ENDPOINT);
 
         let newWs;
         try {
-            newWs = new WebSocket(SONIOX_ENDPOINT);
+            const proxy = getRealtimeProxy(config.proxyUrl, config.proxyToken);
+            newWs = new WebSocket(proxy ? `${proxy.url}soniox` : SONIOX_ENDPOINT,
+                proxy ? ['translator-v1', `auth.${proxy.token}`] : []);
             console.log('[Soniox] WebSocket created, readyState:', newWs.readyState);
         } catch (err) {
             console.error('[Soniox] Failed to create WebSocket:', err);

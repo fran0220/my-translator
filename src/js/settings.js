@@ -10,6 +10,8 @@ const DEFAULT_SETTINGS = {
   openai_api_key: '',
   qwen_api_key: '',
   qwen_service: 'qianwen',
+  realtime_proxy_url: '',
+  realtime_proxy_token: '',
   source_language: 'en',
   target_language: 'zh',
   translation_type: 'one_way',

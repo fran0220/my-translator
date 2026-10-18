@@ -7,6 +7,7 @@ import { settingsManager } from './settings.js';
 import { TranscriptUI } from './ui.js';
 import { initBroadcastOutput } from './broadcast-output.js';
 import { sonioxClient } from './soniox.js';
+import { getRealtimeProxy } from './realtime-proxy.js';
 import { elevenLabsTTS } from './elevenlabs-tts.js';
 import { googleTTS } from './google-tts.js';
 import { edgeTTSRust } from './edge-tts.js';
@@ -808,6 +809,8 @@ class App {
         const qwenKeyInput = document.getElementById('input-qwen-key');
         if (qwenKeyInput) qwenKeyInput.value = s.qwen_api_key || '';
         document.getElementById('select-qwen-service').value = s.qwen_service || 'qianwen';
+        document.getElementById('input-realtime-proxy').value = s.realtime_proxy_url || '';
+        document.getElementById('input-realtime-proxy-token').value = s.realtime_proxy_token || '';
         document.getElementById('select-source-lang').value = s.source_language || 'auto';
         document.getElementById('select-target-lang').value = s.target_language || 'vi';
         document.getElementById('select-translation-mode').value = s.translation_mode || 'soniox';
@@ -946,6 +949,8 @@ class App {
             openai_api_key: document.getElementById('input-openai-key')?.value.trim() || '',
             qwen_api_key: document.getElementById('input-qwen-key')?.value.trim() || '',
             qwen_service: document.getElementById('select-qwen-service').value,
+            realtime_proxy_url: document.getElementById('input-realtime-proxy').value.trim(),
+            realtime_proxy_token: document.getElementById('input-realtime-proxy-token').value.trim(),
             source_language: document.getElementById('select-source-lang').value,
             target_language: document.getElementById('select-target-lang').value,
             translation_mode: document.getElementById('select-translation-mode').value,
@@ -1017,6 +1022,7 @@ class App {
         settings.tts_enabled = false;
 
         try {
+            getRealtimeProxy(settings.realtime_proxy_url, settings.realtime_proxy_token);
             await settingsManager.save(settings);
             this._showToast('设置已保存', 'success');
             this._showView('overlay');
@@ -2166,11 +2172,14 @@ class App {
         statusEl.textContent = '… 正在测试';
 
         try {
+            const proxy = getRealtimeProxy(
+                document.getElementById('input-realtime-proxy').value.trim(),
+                document.getElementById('input-realtime-proxy-token').value.trim());
             const ok = provider === 'soniox'
-                ? await this._pingSoniox(key)
-                : await this._pingOpenAi(key);
+                ? await this._pingSoniox(key, proxy)
+                : await this._pingOpenAi(key, proxy);
             statusEl.className = 'key-status ' + (ok ? 'ok' : 'bad');
-            statusEl.textContent = ok ? '✓ 连接成功' : '✗ 连接被拒绝';
+            statusEl.textContent = ok ? (proxy ? '✓ 中转连接成功' : '✓ 直连成功') : '✗ 连接失败，请检查网络及密钥';
         } catch (e) {
             statusEl.className = 'key-status bad';
             statusEl.textContent = '✗ ' + (e?.message || '失败');
@@ -2180,39 +2189,49 @@ class App {
     }
 
     // Soniox: open WS, send config, wait for first response, close.
-    _pingSoniox(apiKey) {
+    _pingSoniox(apiKey, proxy) {
         return new Promise((resolve) => {
-            const ws = new WebSocket('wss://stt-rt.soniox.com/transcribe-websocket');
-            const timer = setTimeout(() => { try { ws.close(); } catch {} resolve(false); }, 5000);
+            const ws = new WebSocket(proxy ? `${proxy.url}soniox` : 'wss://stt-rt.soniox.com/transcribe-websocket',
+                proxy ? ['translator-v1', `auth.${proxy.token}`] : []);
+            const finish = ok => { clearTimeout(timer); resolve(ok); try { ws.close(); } catch {} };
+            const timer = setTimeout(() => finish(false), 20000);
             ws.onopen = () => {
                 ws.send(JSON.stringify({ api_key: apiKey, model: 'stt-rt-v5', audio_format: 'pcm_s16le', sample_rate: 16000, num_channels: 1 }));
+                ws.send(new ArrayBuffer(32000)); // One second of silence; no microphone access.
+                ws.send('');
             };
             ws.onmessage = (e) => {
-                clearTimeout(timer);
                 try {
                     const v = JSON.parse(e.data);
-                    resolve(!v.error_code);
-                } catch { resolve(true); }
-                try { ws.close(); } catch {}
+                    finish(!v.error_code && (Array.isArray(v.tokens) || v.finished === true));
+                } catch { finish(false); }
             };
-            ws.onerror = () => { clearTimeout(timer); resolve(false); };
+            ws.onerror = () => finish(false);
+            ws.onclose = () => finish(false);
         });
     }
 
-    // OpenAI: cheap HTTP GET /v1/models with the key.
-    async _pingOpenAi(apiKey) {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 5000);
+    // Verify the actual realtime route and session acknowledgement, without sending audio.
+    async _pingOpenAi(apiKey, proxy) {
+        const { OpenAiRealtimeClient } = await import('./openai-realtime-client.js');
+        const client = new OpenAiRealtimeClient();
+        let finish;
+        const result = new Promise(resolve => { finish = resolve; });
+        const timer = setTimeout(() => finish(false), 35000);
+        client.onStatusChange = state => { if (state === 'ready') finish(true); };
+        client.onError = () => finish(false);
+        client.onClosed = () => finish(false);
         try {
-            const r = await fetch('https://api.openai.com/v1/models', {
-                headers: { Authorization: `Bearer ${apiKey}` },
-                signal: ctrl.signal,
+            await client.connect({
+                apiKey, targetLanguage: document.getElementById('select-target-lang').value,
+                proxyUrl: proxy?.url, proxyToken: proxy?.token, audioOutput: false,
             });
-            return r.ok;
+            return await result;
         } catch {
             return false;
         } finally {
             clearTimeout(timer);
+            await client.disconnect();
         }
     }
 
@@ -2366,6 +2385,8 @@ class App {
         try {
             await this.openAiClient.connect({
                 apiKey: settings.openai_api_key,
+                proxyUrl: settings.realtime_proxy_url,
+                proxyToken: settings.realtime_proxy_token,
                 sourceLanguage: settings.source_language || 'auto',
                 targetLanguage: settings.target_language,
                 audioOutput: false,
@@ -2491,6 +2512,8 @@ class App {
         this._updateStatus('connecting');
         sonioxClient.connect({
             apiKey: settings.soniox_api_key,
+            proxyUrl: settings.realtime_proxy_url,
+            proxyToken: settings.realtime_proxy_token,
             sourceLanguage: settings.source_language,
             targetLanguage: settings.target_language,
             customContext: settings.custom_context,

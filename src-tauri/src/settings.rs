@@ -31,6 +31,9 @@ pub struct Settings {
     pub qwen_api_key: String,
     /// Qwen endpoint profile: China 3.8 or Singapore legacy.
     pub qwen_service: String,
+    /// Optional authenticated WebSocket relay for Soniox and OpenAI.
+    pub realtime_proxy_url: String,
+    pub realtime_proxy_token: String,
     /// Source language: "auto" or ISO 639-1 code
     pub source_language: String,
     /// Target language: ISO 639-1 code
@@ -118,6 +121,8 @@ impl Default for Settings {
             openai_api_key: String::new(),
             qwen_api_key: String::new(),
             qwen_service: "qianwen".to_string(),
+            realtime_proxy_url: String::new(),
+            realtime_proxy_token: String::new(),
             source_language: "en".to_string(),
             target_language: "zh".to_string(),
             translation_type: "one_way".to_string(),
@@ -219,11 +224,15 @@ mod tests {
         assert_eq!(legacy.source_language, "en");
         assert_eq!(legacy.target_language, "zh");
         assert_eq!(legacy.qwen_service, "qianwen");
+        assert!(legacy.realtime_proxy_url.is_empty());
+        assert!(legacy.realtime_proxy_token.is_empty());
         let settings: Settings = serde_json::from_str(r#"{
             "source_language":"zh", "target_language":"en",
             "translation_type":"two_way", "language_a":"zh", "language_b":"en",
             "language_hints_strict":true, "endpoint_delay":1500,
-            "qwen_service":"dashscope_intl"
+            "qwen_service":"dashscope_intl",
+            "realtime_proxy_url":"https://relay.example.com",
+            "realtime_proxy_token":"test-only-team-token-0123456789abcdef"
         }"#).unwrap();
         let saved = serde_json::to_string(&settings).unwrap();
         let restored: Settings = serde_json::from_str(&saved).unwrap();
@@ -235,5 +244,7 @@ mod tests {
         assert!(restored.language_hints_strict);
         assert_eq!(restored.endpoint_delay, 1500);
         assert_eq!(restored.qwen_service, "dashscope_intl");
+        assert_eq!(restored.realtime_proxy_url, "https://relay.example.com");
+        assert_eq!(restored.realtime_proxy_token, "test-only-team-token-0123456789abcdef");
     }
 }

@@ -16,7 +16,10 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Instant};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{client::IntoClientRequest, Message},
+};
 
 use crate::audio::resampler::UpsamplerTo24k;
 
@@ -29,6 +32,10 @@ pub struct OpenAiRealtimeConfig {
     pub source_language: String,
     pub target_language: String,
     pub voice: Option<String>,
+    #[serde(default)]
+    pub proxy_url: String,
+    #[serde(default)]
+    pub proxy_token: String,
     /// Playback preference only. This API generates audio even when muted;
     /// it does not support text-only output or the corresponding cost savings.
     #[serde(default = "default_true")]
@@ -113,6 +120,8 @@ pub async fn openai_realtime_start(
         source_language: config.source_language,
         target_language: config.target_language,
         voice: config.voice,
+        proxy_url: config.proxy_url,
+        proxy_token: config.proxy_token,
         audio_output: config.audio_output,
     };
 
@@ -175,26 +184,61 @@ pub async fn openai_realtime_stop(
     Ok(())
 }
 
+fn connection_request(cfg: &OpenAiRealtimeConfig) -> Result<Request<()>, String> {
+    let proxied = !cfg.proxy_url.trim().is_empty();
+    let endpoint = if proxied {
+        let mut url = reqwest::Url::parse(cfg.proxy_url.trim()).map_err(|_| "中转地址格式无效")?;
+        if !matches!(url.scheme(), "https" | "wss")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.path() != "/"
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err("中转地址只允许 HTTPS/WSS 域名，不含路径、凭据或参数".into());
+        }
+        if !(32..=128).contains(&cfg.proxy_token.len())
+            || !cfg
+                .proxy_token
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+        {
+            return Err("团队中转令牌格式无效".into());
+        }
+        url.set_scheme("wss").map_err(|_| "中转地址协议无效")?;
+        url.set_path("/openai");
+        url.to_string()
+    } else {
+        OPENAI_REALTIME_URL.to_string()
+    };
+    let mut request = endpoint
+        .into_client_request()
+        .map_err(|_| "无法创建实时连接")?;
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", cfg.api_key)
+            .parse()
+            .map_err(|_| "OpenAI API 密钥格式无效")?,
+    );
+    if proxied {
+        request.headers_mut().insert(
+            "X-Translator-Token",
+            cfg.proxy_token
+                .parse()
+                .map_err(|_| "团队中转令牌格式无效")?,
+        );
+    }
+    Ok(request)
+}
+
 async fn run_session(
     cfg: OpenAiRealtimeConfig,
     mut audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     mut stop_rx: mpsc::UnboundedReceiver<()>,
     event_ch: Channel<OpenAiEvent>,
 ) -> Result<(), String> {
-    // Build WebSocket request with auth headers
-    let request = Request::builder()
-        .uri(OPENAI_REALTIME_URL)
-        .header("Authorization", format!("Bearer {}", cfg.api_key))
-        .header("Host", "api.openai.com")
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header("Sec-WebSocket-Version", "13")
-        .header(
-            "Sec-WebSocket-Key",
-            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-        )
-        .body(())
-        .map_err(|e| format!("build request: {}", e))?;
+    let request = connection_request(&cfg)?;
 
     let (ws_stream, _) = timeout(Duration::from_secs(15), connect_async(request))
         .await

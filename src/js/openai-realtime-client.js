@@ -47,6 +47,8 @@ export class OpenAiRealtimeClient {
                     source_language: cfg.sourceLanguage || 'auto',
                     target_language: cfg.targetLanguage,
                     voice: cfg.voice || null,
+                    proxy_url: cfg.proxyUrl || '',
+                    proxy_token: cfg.proxyToken || '',
                     audio_output: cfg.audioOutput !== false,
                 },
                 onEvent: this.channel,

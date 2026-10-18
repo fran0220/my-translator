@@ -361,6 +361,14 @@
           </div>
         </div>
 
+        <div class="settings-section field">
+          <label class="field-label" for="input-realtime-proxy">实时翻译中转（可选）</label>
+          <input type="text" id="input-realtime-proxy" placeholder="https://您的中转域名" autocomplete="off" spellcheck="false" />
+          <label class="field-label" for="input-realtime-proxy-token">团队中转令牌</label>
+          <input type="password" id="input-realtime-proxy-token" placeholder="由团队管理员提供，不是 API 密钥" autocomplete="off" />
+          <p class="hint">仅 Soniox / OpenAI 使用；Qwen 不变。地址留空为直连。中转失败不会自动绕过。服务商 API 密钥仍需填写；测试按钮也使用此中转。</p>
+        </div>
+
         <div class="settings-section" id="section-api-key">
           <span class="field-label">
             Soniox API 密钥
