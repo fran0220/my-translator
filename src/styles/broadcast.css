@@ -20,6 +20,7 @@ main {
 }
 section {
     min-height: 0;
+    max-height: 3lh;
     overflow: hidden;
     overflow-wrap: anywhere;
     white-space: pre-wrap;
