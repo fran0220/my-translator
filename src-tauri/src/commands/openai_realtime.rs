@@ -11,9 +11,11 @@ use http::Request;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::ipc::Channel;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 use tokio::sync::mpsc;
+use tokio::time::{timeout, Instant};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::audio::resampler::UpsamplerTo24k;
@@ -27,9 +29,8 @@ pub struct OpenAiRealtimeConfig {
     pub source_language: String,
     pub target_language: String,
     pub voice: Option<String>,
-    /// When true (default), server generates translated audio output.
-    /// When false, requests text-only modality so no TTS audio is generated
-    /// (saves cost and bandwidth — for read-only use cases).
+    /// Playback preference only. This API generates audio even when muted;
+    /// it does not support text-only output or the corresponding cost savings.
     #[serde(default = "default_true")]
     pub audio_output: bool,
 }
@@ -82,6 +83,7 @@ pub async fn openai_realtime_start(
     config: OpenAiRealtimeConfig,
     on_event: Channel<OpenAiEvent>,
     state: State<'_, OpenAiState>,
+    app: AppHandle,
 ) -> Result<u64, String> {
     if config.api_key.trim().is_empty() {
         return Err("OpenAI API key is empty".into());
@@ -127,6 +129,11 @@ pub async fn openai_realtime_start(
             });
         }
 
+        app.state::<OpenAiState>()
+            .sessions
+            .lock()
+            .unwrap()
+            .remove(&session_id);
         let _ = event_ch.send(OpenAiEvent::Closed {
             reason: "session_ended".into(),
         });
@@ -189,9 +196,10 @@ async fn run_session(
         .body(())
         .map_err(|e| format!("build request: {}", e))?;
 
-    let (ws_stream, _) = connect_async(request)
+    let (ws_stream, _) = timeout(Duration::from_secs(15), connect_async(request))
         .await
-        .map_err(|e| format!("websocket connect: {}", e))?;
+        .map_err(|_| "OpenAI 连接超时".to_string())?
+        .map_err(|_| "OpenAI 连接失败，请检查密钥和网络".to_string())?;
 
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
@@ -202,21 +210,32 @@ async fn run_session(
         .await
         .map_err(|e| format!("send session.update: {}", e))?;
 
-    let _ = event_ch.send(OpenAiEvent::Status {
-        state: "ready".into(),
-        message: None,
-    });
+    let mut ready = false;
+    let ack_deadline = Instant::now() + Duration::from_secs(15);
+    let mut drain_deadline = None;
 
     loop {
         tokio::select! {
             biased;
 
-            _ = stop_rx.recv() => {
-                let _ = ws_sink.send(Message::Close(None)).await;
+            _ = stop_rx.recv(), if drain_deadline.is_none() => {
+                audio_rx.close();
+                while audio_rx.try_recv().is_ok() {}
+                let deadline = Instant::now() + Duration::from_secs(3);
+                drain_deadline = Some(deadline);
+                tokio::time::timeout_at(deadline, ws_sink.send(Message::Text(
+                    serde_json::json!({"type": "session.close"}).to_string().into()
+                ))).await.map_err(|_| "结束 OpenAI 会话超时".to_string())?
+                    .map_err(|_| "结束 OpenAI 会话失败".to_string())?;
+            }
+
+            _ = tokio::time::sleep_until(drain_deadline.unwrap_or(ack_deadline)),
+                if drain_deadline.is_some() || !ready => {
+                if drain_deadline.is_none() { return Err("等待 OpenAI 会话确认超时".into()); }
                 break;
             }
 
-            Some(audio_chunk) = audio_rx.recv() => {
+            Some(audio_chunk) = audio_rx.recv(), if ready && drain_deadline.is_none() => {
                 let b64 = B64.encode(&audio_chunk);
                 let evt = serde_json::json!({
                     "type": "session.input_audio_buffer.append",
@@ -231,15 +250,18 @@ async fn run_session(
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         handle_server_event(&text, &event_ch, cfg.audio_output);
+                        let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                        match value["type"].as_str() {
+                            Some("session.updated") if !ready => {
+                                ready = true;
+                                let _ = event_ch.send(OpenAiEvent::Status { state: "ready".into(), message: None });
+                            }
+                            Some("session.closed" | "error") => break,
+                            _ => {}
+                        }
                     }
                     Some(Ok(Message::Binary(_))) => {}
-                    Some(Ok(Message::Close(frame))) => {
-                        let reason = frame
-                            .map(|f| format!("{}: {}", f.code, f.reason))
-                            .unwrap_or_else(|| "remote_close".into());
-                        let _ = event_ch.send(OpenAiEvent::Closed { reason });
-                        break;
-                    }
+                    Some(Ok(Message::Close(_))) => break,
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(format!("ws error: {}", e)),
                     None => break,
@@ -248,6 +270,7 @@ async fn run_session(
         }
     }
 
+    let _ = timeout(Duration::from_millis(100), ws_sink.close()).await;
     Ok(())
 }
 
@@ -346,11 +369,7 @@ fn handle_server_event(text: &str, event_ch: &Channel<OpenAiEvent>, audio_output
                 });
             }
         }
-        "session.closed" => {
-            let _ = event_ch.send(OpenAiEvent::Closed {
-                reason: "session.closed".into(),
-            });
-        }
+        "session.closed" => {}
         "error" => {
             let code = value
                 .get("error")
@@ -358,21 +377,13 @@ fn handle_server_event(text: &str, event_ch: &Channel<OpenAiEvent>, audio_output
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            let msg = value
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let msg = "OpenAI 服务返回错误，请检查密钥、额度及语言设置".to_string();
             let _ = event_ch.send(OpenAiEvent::Error { code, message: msg });
         }
         other => {
             // Log unknown event types so we can discover server-side names we
             // haven't mapped yet (e.g. turn lifecycle around speech pauses).
-            eprintln!(
-                "[openai-realtime] unhandled event type: {} | payload: {}",
-                other, text
-            );
+            eprintln!("[openai-realtime] unhandled event type: {}", other);
         }
     }
 }
