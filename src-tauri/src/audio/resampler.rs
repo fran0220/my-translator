@@ -64,4 +64,11 @@ impl UpsamplerTo24k {
 
         Ok(out_bytes)
     }
+
+    /// Flush the partial input and the sinc filter's delayed samples at native stop.
+    /// Padding is silence, never speech from a subsequent session.
+    pub fn finish(&mut self) -> Result<Vec<u8>, String> {
+        let padding = CHUNK_SIZE - self.input_buf.len() + CHUNK_SIZE;
+        self.push(&vec![0; padding * 2])
+    }
 }

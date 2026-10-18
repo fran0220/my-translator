@@ -283,6 +283,7 @@ impl Transport {
                     let event = match event {
                         soniox::Event::Ready => Event::Status("Soniox · 正在翻译".into()),
                         soniox::Event::Text(value) => Event::Soniox(value),
+                        soniox::Event::Boundary => Event::Boundary,
                     };
                     let _ = tx.send(event);
                 }
@@ -329,11 +330,37 @@ fn run(
             }
             if stop.load(Ordering::SeqCst) && stopping.is_none() {
                 capture.stop();
+                // WASAPI/ScreenCaptureKit stop asynchronously. Wait for sender
+                // teardown so their last callback is included, with a hard bound.
+                if let Err(message) =
+                    drain_capture(&capture.inputs, &mut inputs, Duration::from_secs(1))
+                {
+                    error = Some(message);
+                }
+                if let Err(message) = flush_inputs(&mut inputs, &mut transport) {
+                    error = Some(message);
+                }
+                if let Transport::OpenAi {
+                    audio, resampler, ..
+                } = &mut transport
+                {
+                    match resampler.finish() {
+                        Ok(pcm) if !pcm.is_empty() => {
+                            if audio.try_send(pcm).is_err() {
+                                error =
+                                    Some("OpenAI 收尾音频队列已满或关闭，尾句可能不完整".into());
+                            }
+                        }
+                        Err(message) => error = Some(message),
+                        _ => {}
+                    }
+                }
                 transport.stop();
                 stopping = Some(Instant::now());
                 let _ = tx.send(Event::Status("正在停止，等待尾句…".into()));
             }
             if stopping.is_some_and(|t| t.elapsed() >= Duration::from_secs(16)) {
+                error = Some("停止等待超时，尾句可能不完整".into());
                 task.abort();
                 break;
             }
@@ -355,19 +382,7 @@ fn run(
                 && flush.elapsed() >= Duration::from_millis(200)
                 && inputs.iter().any(|input| !input.is_empty())
             {
-                let mut buffer = mix_pcm(&inputs);
-                for input in &mut inputs {
-                    input.clear();
-                }
-                // Keep exact 200 ms blocks so OpenAI/Soniox packet limits also bound bytes.
-                while !buffer.is_empty() {
-                    let rest = buffer.split_off(buffer.len().min(6400));
-                    let block = std::mem::replace(&mut buffer, rest);
-                    if let Err(message) = transport.audio(block) {
-                        error = Some(message);
-                        break;
-                    }
-                }
+                error = flush_inputs(&mut inputs, &mut transport).err();
                 flush = Instant::now();
                 if error.is_some() {
                     transport.stop();
@@ -407,8 +422,42 @@ fn run(
     Err("所有已配置服务均不可用，请检查网络、密钥或代理后重试".into())
 }
 
-/// Mix simultaneous PCM streams on the same timeline, rather than concatenating
-/// system/microphone packets (which doubles their apparent duration).
+fn drain_capture(
+    receivers: &[mpsc::Receiver<Vec<u8>>],
+    inputs: &mut [Vec<u8>],
+    limit: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + limit;
+    for (receiver, input) in receivers.iter().zip(inputs) {
+        loop {
+            match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(pcm) => input.extend(pcm),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err("音频设备停止超时，尾句可能不完整".into());
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err("音频设备停止超时，尾句可能不完整".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn flush_inputs(inputs: &mut [Vec<u8>], transport: &mut Transport) -> Result<(), String> {
+    let buffer = mix_pcm(inputs);
+    for input in inputs {
+        input.clear();
+    }
+    // Keep 200 ms blocks so packet limits also bound bytes; retain a short tail.
+    for block in buffer.chunks(6400) {
+        transport.audio(block.to_vec())?;
+    }
+    Ok(())
+}
+
+/// Mix simultaneous PCM streams on the same timeline, not concatenated duration.
 fn mix_pcm(inputs: &[Vec<u8>]) -> Vec<u8> {
     let length = inputs.iter().map(Vec::len).max().unwrap_or_default() / 2;
     (0..length)
@@ -430,6 +479,161 @@ fn mix_pcm(inputs: &[Vec<u8>]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use tokio_tungstenite::tungstenite::Message;
+
+    #[test]
+    fn stop_includes_last_asynchronous_capture_callback_and_reports_stalled_device() {
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            tx.send(vec![3, 0]).unwrap();
+        });
+        let mut inputs = vec![vec![1, 0, 2, 0]];
+        drain_capture(&[rx], &mut inputs, Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+        assert_eq!(inputs[0], [1, 0, 2, 0, 3, 0]);
+        let (_tx, rx) = mpsc::channel();
+        assert!(
+            drain_capture(&[rx], &mut inputs, Duration::from_millis(10))
+                .unwrap_err()
+                .contains("超时")
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_sends_partial_capture_and_queued_audio_before_provider_finish() {
+        for provider in ["openai", "qianwen", "dashscope_intl"] {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    let mut socket =
+                        tokio_tungstenite::accept_async(listener.accept().await.unwrap().0)
+                            .await
+                            .unwrap();
+                    let update = socket.next().await.unwrap().unwrap();
+                    assert_eq!(
+                        serde_json::from_str::<Value>(update.to_text().unwrap()).unwrap()["type"],
+                        "session.update"
+                    );
+                    // Stop is already queued before acknowledgement. Audio must wait,
+                    // then drain FIFO before the termination message.
+                    socket
+                        .send(Message::Text(
+                            json!({"type":"session.updated"}).to_string().into(),
+                        ))
+                        .await
+                        .unwrap();
+                    let mut received = Vec::new();
+                    loop {
+                        let message = socket.next().await.unwrap().unwrap();
+                        let value: Value =
+                            serde_json::from_str(message.to_text().unwrap()).unwrap();
+                        if value["type"]
+                            == if provider == "openai" {
+                                "session.close"
+                            } else {
+                                "session.finish"
+                            }
+                        {
+                            break;
+                        }
+                        assert_eq!(
+                            value["type"],
+                            if provider == "openai" {
+                                "session.input_audio_buffer.append"
+                            } else {
+                                "input_audio_buffer.append"
+                            }
+                        );
+                        received.extend(B64.decode(value["audio"].as_str().unwrap()).unwrap());
+                    }
+                    let finished = if provider == "openai" {
+                        "session.closed"
+                    } else {
+                        "session.finished"
+                    };
+                    socket
+                        .send(Message::Text(json!({"type":finished}).to_string().into()))
+                        .await
+                        .unwrap();
+                    received
+                });
+                let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+                    .await
+                    .unwrap();
+                let (audio, audio_rx) = async_mpsc::channel(15);
+                let mut inputs = vec![vec![42, 0, 19, 0], vec![8, 0]];
+                let expected;
+                let result;
+                if provider == "openai" {
+                    let (stop, stop_rx) = async_mpsc::unbounded_channel();
+                    let (tx, events) = mpsc::channel();
+                    let mut transport = Transport::OpenAi {
+                        audio: audio.clone(),
+                        stop,
+                        events,
+                        resampler: UpsamplerTo24k::new().unwrap(),
+                    };
+                    // A preceding chunk has already reached the outbound queue.
+                    audio.send(vec![3, 0, 4, 0]).await.unwrap();
+                    flush_inputs(&mut inputs, &mut transport).unwrap();
+                    if let Transport::OpenAi { resampler, .. } = &mut transport {
+                        let tail = resampler.finish().unwrap();
+                        assert!(
+                            tail.chunks_exact(2)
+                                .any(|b| i16::from_le_bytes([b[0], b[1]]) != 0)
+                        );
+                        expected = [vec![3, 0, 4, 0], tail.clone()].concat();
+                        audio.send(tail).await.unwrap();
+                    } else {
+                        unreachable!()
+                    }
+                    transport.stop();
+                    let cfg = openai::OpenAiRealtimeConfig {
+                        api_key: String::new(),
+                        source_language: "en".into(),
+                        target_language: "zh".into(),
+                        voice: None,
+                        proxy_url: String::new(),
+                        proxy_token: String::new(),
+                        audio_output: false,
+                    };
+                    result = openai::run_connected(cfg, audio_rx, stop_rx, tx, socket).await;
+                } else {
+                    let (audio, audio_rx) = async_mpsc::channel(15);
+                    let (stop, stop_rx) = async_mpsc::channel(1);
+                    let (tx, events) = mpsc::channel();
+                    let mut transport = Transport::Qwen {
+                        audio,
+                        stop,
+                        events,
+                        budget: Arc::new(Semaphore::new(qwen::MAX_QUEUED_AUDIO_BYTES)),
+                    };
+                    transport.audio(vec![3, 0, 4, 0]).unwrap();
+                    flush_inputs(&mut inputs, &mut transport).unwrap();
+                    expected = vec![3, 0, 4, 0, 50, 0, 19, 0];
+                    transport.stop();
+                    let cfg = qwen::QwenRealtimeConfig {
+                        api_key: String::new(),
+                        source_language: "en".into(),
+                        target_language: "zh".into(),
+                        service: provider.into(),
+                    };
+                    result = qwen::run_connected(cfg, audio_rx, stop_rx, tx, socket).await;
+                }
+                result.unwrap();
+                assert!(inputs.iter().all(Vec::is_empty));
+                assert_eq!(server.await.unwrap(), expected);
+            })
+            .await
+            .unwrap();
+        }
+    }
+
     #[test]
     fn concurrent_sources_mix_without_doubling_duration_or_overflowing() {
         let pcm = |v: &[i16]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
