@@ -116,13 +116,19 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
+        let bundled: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("OUT_DIR"),
+            "/private-settings.json"
+        )))
+        .expect("Invalid bundled settings");
+        let preset = |key: &str| bundled[key].as_str().unwrap_or_default().to_owned();
         Self {
-            soniox_api_key: String::new(),
-            openai_api_key: String::new(),
-            qwen_api_key: String::new(),
+            soniox_api_key: preset("soniox_api_key"),
+            openai_api_key: preset("openai_api_key"),
+            qwen_api_key: preset("qwen_api_key"),
             qwen_service: "qianwen".to_string(),
-            realtime_proxy_url: String::new(),
-            realtime_proxy_token: String::new(),
+            realtime_proxy_url: preset("realtime_proxy_url"),
+            realtime_proxy_token: preset("realtime_proxy_token"),
             source_language: "en".to_string(),
             target_language: "zh".to_string(),
             translation_type: "one_way".to_string(),
@@ -174,7 +180,12 @@ fn default_local_tts_speed() -> f32 {
 fn settings_path() -> PathBuf {
     let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     path.push("com.personal.translator");
-    path.push("settings.json");
+    // A private one-off build must not inherit blank or unrelated public relay settings.
+    path.push(if cfg!(feature = "private-team") {
+        "settings-team.json"
+    } else {
+        "settings.json"
+    });
     path
 }
 
@@ -224,16 +235,29 @@ mod tests {
         assert_eq!(legacy.source_language, "en");
         assert_eq!(legacy.target_language, "zh");
         assert_eq!(legacy.qwen_service, "qianwen");
-        assert!(legacy.realtime_proxy_url.is_empty());
-        assert!(legacy.realtime_proxy_token.is_empty());
-        let settings: Settings = serde_json::from_str(r#"{
+        if cfg!(feature = "private-team") {
+            assert_eq!(legacy.realtime_proxy_url, "https://translate.xiaomao.chat");
+            assert!(!legacy.realtime_proxy_token.is_empty());
+        } else {
+            assert!(legacy.realtime_proxy_url.is_empty());
+            assert!(legacy.realtime_proxy_token.is_empty());
+            assert!(legacy.soniox_api_key.is_empty());
+            assert!(legacy.openai_api_key.is_empty());
+            assert!(legacy.qwen_api_key.is_empty());
+        }
+        let settings: Settings = serde_json::from_str(
+            r#"{
             "source_language":"zh", "target_language":"en",
+            "soniox_api_key":"user-override-soniox", "openai_api_key":"user-override-openai",
+            "qwen_api_key":"user-override-qwen",
             "translation_type":"two_way", "language_a":"zh", "language_b":"en",
             "language_hints_strict":true, "endpoint_delay":1500,
             "qwen_service":"dashscope_intl",
             "realtime_proxy_url":"https://relay.example.com",
             "realtime_proxy_token":"test-only-team-token-0123456789abcdef"
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         let saved = serde_json::to_string(&settings).unwrap();
         let restored: Settings = serde_json::from_str(&saved).unwrap();
         assert_eq!(restored.source_language, "zh");
@@ -244,7 +268,13 @@ mod tests {
         assert!(restored.language_hints_strict);
         assert_eq!(restored.endpoint_delay, 1500);
         assert_eq!(restored.qwen_service, "dashscope_intl");
+        assert!(restored.soniox_api_key == "user-override-soniox");
+        assert!(restored.openai_api_key == "user-override-openai");
+        assert!(restored.qwen_api_key == "user-override-qwen");
         assert_eq!(restored.realtime_proxy_url, "https://relay.example.com");
-        assert_eq!(restored.realtime_proxy_token, "test-only-team-token-0123456789abcdef");
+        assert_eq!(
+            restored.realtime_proxy_token,
+            "test-only-team-token-0123456789abcdef"
+        );
     }
 }

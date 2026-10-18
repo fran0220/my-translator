@@ -19,7 +19,53 @@ fn main() {
         load_env_secret("GOOGLE_FREE_TTS_KEY");
     }
 
+    write_private_settings();
     tauri_build::build()
+}
+
+/// Explicit opt-in only. Never print credential values in Cargo directives/logs.
+fn write_private_settings() {
+    let variables = [
+        ("realtime_proxy_token", "TRANSLATOR_TEAM_TOKEN"),
+        ("soniox_api_key", "SONIOX_API_KEY"),
+        ("openai_api_key", "OPENAI_API_KEY"),
+        ("qwen_api_key", "DASHSCOPE_API_KEY"),
+    ];
+    for (_, variable) in variables {
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
+    let mut settings = serde_json::Map::new();
+    if std::env::var_os("CARGO_FEATURE_PRIVATE_TEAM").is_some() {
+        for (field, variable) in variables {
+            let value = std::env::var(variable)
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            settings.insert(field.into(), value.into());
+        }
+        let token = settings["realtime_proxy_token"].as_str().unwrap();
+        assert!(
+            (32..=128).contains(&token.len())
+                && token
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'),
+            "private-team requires a valid TRANSLATOR_TEAM_TOKEN"
+        );
+        settings.insert(
+            "realtime_proxy_url".into(),
+            "https://translate.xiaomao.chat".into(),
+        );
+    }
+    let path = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap())
+        .join("private-settings.json");
+    std::fs::write(&path, serde_json::to_vec(&settings).unwrap())
+        .expect("Unable to write build settings");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("Unable to restrict build settings permissions");
+    }
 }
 
 /// Read `KEY=VALUE` for `key` from ../.env and re-export it as a compile-time env var.

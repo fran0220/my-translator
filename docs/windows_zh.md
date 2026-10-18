@@ -24,7 +24,25 @@ npm run build -- --bundles nsis --config src-tauri/tauri.windows.conf.json
 
 ## API Key 与隐私
 
-安装包不附带开发者的 API Key。启动后，请在设置中自行填写所选服务需要的个人 API Key；费用、额度和权限由自己的服务账号承担。不要将密钥提交到仓库或填写到工作流文件中。Windows 构建不会读取 `.env` 中的 `GOOGLE_FREE_TTS_KEY`，也会清空编译环境中的该密钥；Google Free TTS 同样需要在设置中输入自己的有效密钥，否则不可用。
+普通安装包不附带开发者的 API Key。启动后，请在设置中自行填写所选服务需要的个人 API Key；费用、额度和权限由自己的服务账号承担。不要将密钥提交到仓库或填写到工作流文件中。Windows 构建不会读取 `.env` 中的 `GOOGLE_FREE_TTS_KEY`，也会清空编译环境中的该密钥；Google Free TTS 同样需要在设置中输入自己的有效密钥，否则不可用。
+
+### 一次性团队内部版
+
+仅在明确启用 `private-team` 构建特性时，内置 `https://translate.xiaomao.chat`，并从构建进程环境注入以下值；不从源码或前端 JavaScript 读取密钥：
+
+- `TRANSLATOR_TEAM_TOKEN`：必填，DMIT 中转团队令牌。缺失或格式无效时构建失败。
+- `SONIOX_API_KEY`、`OPENAI_API_KEY`、`DASHSCOPE_API_KEY`：可选，分别预填三个服务的 Key。全部提供则首次使用无需填写；未提供的服务仍可在设置中手动填写。Qwen 默认对应中国站。
+
+在受控 Windows 构建机安全注入环境变量后，使用独立产物目录：
+
+```powershell
+$env:CARGO_TARGET_DIR = "target-private-team"
+npm run build -- --features private-team --bundles nsis --config src-tauri/tauri.windows.conf.json
+```
+
+此命令只作为构建说明，不代表已经执行或恢复打包。现有 GitHub Actions 保持普通构建，不注入私密值。内部版使用独立 `settings-team.json`，不继承普通版的空密钥或其他中转地址；保存过的内部版设置仍优先于内置默认值，可在设置里修改。
+
+构建过程不会把私密值输出到 Cargo 指令或日志，但生成的配置、可执行文件、安装包、调试文件和构建缓存均应视为敏感材料；不得上传公共产物或分享给团队外人员。**内置不等于加密保管：持有安装包的人可以提取 Key 和团队令牌。** 建议使用专用、限额的 Key，用完撤销/轮换并清理构建目录和内部版配置。
 
 ## 中英双语与导播字幕
 

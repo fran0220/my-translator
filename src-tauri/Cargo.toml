@@ -11,8 +11,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+serde_json = "1"
 
 [features]
+private-team = []
 # Enabled only for dev builds (via scripts/tauri-with-env.mjs) to expose the WebView
 # inspector. Release builds (npm run build / tauri build) never enable this.
 devtools = ["tauri/devtools"]
