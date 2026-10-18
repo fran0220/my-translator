@@ -1,0 +1,17 @@
+{
+	log default {
+		format filter {
+			wrap json
+			fields {
+				request>headers>Authorization delete
+				request>headers>Sec-Websocket-Protocol delete
+				request>headers>X-Translator-Token delete
+				request>headers>Cookie delete
+			}
+		}
+	}
+}
+
+{$RELAY_DOMAIN} {
+	reverse_proxy relay:8787
+}

@@ -1,0 +1,12 @@
+{
+  "name": "my-translator-relay",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test server.test.mjs",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  }
+}

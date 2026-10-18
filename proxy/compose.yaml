@@ -1,0 +1,32 @@
+name: translator-relay
+services:
+  relay:
+    build: .
+    environment:
+      RELAY_TOKEN: ${RELAY_TOKEN:?Set a random team relay token in .env}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    pids_limit: 64
+    stop_grace_period: 10s
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:?Set the relay domain in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    depends_on:
+      relay:
+        condition: service_healthy
+volumes:
+  caddy_data:
+  caddy_config:
