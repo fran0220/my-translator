@@ -25,6 +25,7 @@ dist-ssr
 
 # Rust build artifacts
 src-tauri/target/
+native/target/
 target-private-team/
 src-tauri/target-private-team/
 

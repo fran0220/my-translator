@@ -9,10 +9,16 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use futures_util::{SinkExt, StreamExt};
 use http::Request;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "tauri-host")]
 use std::collections::HashMap;
+#[cfg(feature = "tauri-host")]
 use std::sync::Mutex;
 use std::time::Duration;
+#[cfg(not(feature = "tauri-host"))]
+use std::sync::mpsc::Sender as Channel;
+#[cfg(feature = "tauri-host")]
 use tauri::ipc::Channel;
+#[cfg(feature = "tauri-host")]
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Instant};
@@ -21,6 +27,7 @@ use tokio_tungstenite::{
     tungstenite::{client::IntoClientRequest, Message},
 };
 
+#[cfg(feature = "tauri-host")]
 use crate::audio::resampler::UpsamplerTo24k;
 
 const OPENAI_REALTIME_URL: &str =
@@ -73,18 +80,21 @@ pub enum OpenAiEvent {
     },
 }
 
+#[cfg(feature = "tauri-host")]
 struct Session {
     audio_tx: mpsc::UnboundedSender<Vec<u8>>,
     stop_tx: mpsc::UnboundedSender<()>,
     upsampler: Mutex<UpsamplerTo24k>,
 }
 
+#[cfg(feature = "tauri-host")]
 #[derive(Default)]
 pub struct OpenAiState {
     sessions: Mutex<HashMap<u64, Session>>,
     next_id: Mutex<u64>,
 }
 
+#[cfg(feature = "tauri-host")]
 #[tauri::command]
 pub async fn openai_realtime_start(
     config: OpenAiRealtimeConfig,
@@ -151,6 +161,7 @@ pub async fn openai_realtime_start(
     Ok(session_id)
 }
 
+#[cfg(feature = "tauri-host")]
 #[tauri::command]
 pub async fn openai_realtime_send_audio(
     session_id: u64,
@@ -172,6 +183,7 @@ pub async fn openai_realtime_send_audio(
     Ok(())
 }
 
+#[cfg(feature = "tauri-host")]
 #[tauri::command]
 pub async fn openai_realtime_stop(
     session_id: u64,
@@ -232,9 +244,14 @@ fn connection_request(cfg: &OpenAiRealtimeConfig) -> Result<Request<()>, String>
     Ok(request)
 }
 
-async fn run_session(
+#[cfg(feature = "tauri-host")]
+type AudioReceiver = mpsc::UnboundedReceiver<Vec<u8>>;
+#[cfg(not(feature = "tauri-host"))]
+type AudioReceiver = mpsc::Receiver<Vec<u8>>;
+
+pub async fn run_session(
     cfg: OpenAiRealtimeConfig,
-    mut audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut audio_rx: AudioReceiver,
     mut stop_rx: mpsc::UnboundedReceiver<()>,
     event_ch: Channel<OpenAiEvent>,
 ) -> Result<(), String> {

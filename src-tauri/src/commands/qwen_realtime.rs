@@ -8,12 +8,20 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use futures_util::{SinkExt, StreamExt};
 use http::Request;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "tauri-host")]
 use std::collections::HashMap;
+#[cfg(feature = "tauri-host")]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+#[cfg(not(feature = "tauri-host"))]
+use std::sync::mpsc::Sender as Channel;
+#[cfg(feature = "tauri-host")]
 use tauri::ipc::Channel;
+#[cfg(feature = "tauri-host")]
 use tauri::{AppHandle, Manager, State};
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, OwnedSemaphorePermit};
+#[cfg(feature = "tauri-host")]
+use tokio::sync::Semaphore;
 use tokio::time::{timeout, Instant};
 use tokio_tungstenite::{connect_async_with_config, tungstenite::Message};
 
@@ -22,7 +30,7 @@ const QWEN_REALTIME_URL: &str =
 const QIANWEN_REALTIME_URL: &str =
     "wss://maas.qianwenaiapi.com/api-ws/v1/realtime?model=qwen3.8-livetranslate-flash-realtime";
 // Three seconds of PCM16, 16 kHz mono; cap both bytes and tiny/empty packets.
-const MAX_QUEUED_AUDIO_BYTES: usize = 16_000 * 2 * 3;
+pub const MAX_QUEUED_AUDIO_BYTES: usize = 16_000 * 2 * 3;
 const IO_TIMEOUT: Duration = Duration::from_secs(3);
 
 fn default_service() -> String {
@@ -71,18 +79,21 @@ pub enum QwenEvent {
     },
 }
 
+#[cfg(feature = "tauri-host")]
 struct Session {
     audio_tx: mpsc::Sender<(Vec<u8>, OwnedSemaphorePermit)>,
     audio_budget: Arc<Semaphore>,
     stop_tx: mpsc::Sender<()>,
 }
 
+#[cfg(feature = "tauri-host")]
 #[derive(Default)]
 pub struct QwenState {
     sessions: Mutex<HashMap<u64, Session>>,
     next_id: Mutex<u64>,
 }
 
+#[cfg(feature = "tauri-host")]
 #[tauri::command]
 pub async fn qwen_realtime_start(
     config: QwenRealtimeConfig,
@@ -139,6 +150,7 @@ pub async fn qwen_realtime_start(
     Ok(session_id)
 }
 
+#[cfg(feature = "tauri-host")]
 #[tauri::command]
 pub async fn qwen_realtime_send_audio(
     session_id: u64,
@@ -171,6 +183,7 @@ pub async fn qwen_realtime_send_audio(
     Ok(())
 }
 
+#[cfg(feature = "tauri-host")]
 #[tauri::command]
 pub async fn qwen_realtime_stop(
     session_id: u64,
@@ -183,7 +196,7 @@ pub async fn qwen_realtime_stop(
     Ok(())
 }
 
-async fn run_session(
+pub async fn run_session(
     cfg: QwenRealtimeConfig,
     mut audio_rx: mpsc::Receiver<(Vec<u8>, OwnedSemaphorePermit)>,
     mut stop_rx: mpsc::Receiver<()>,
