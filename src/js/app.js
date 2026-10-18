@@ -797,6 +797,7 @@ class App {
     _populateSettingsForm() {
         const s = settingsManager.get();
 
+        document.getElementById('select-direction').value = '';
         document.getElementById('input-api-key').value = s.soniox_api_key || '';
         const openaiKeyInput = document.getElementById('input-openai-key');
         if (openaiKeyInput) openaiKeyInput.value = s.openai_api_key || '';

@@ -205,3 +205,29 @@ impl Settings {
 
 /// Thread-safe settings state managed by Tauri
 pub struct SettingsState(pub Mutex<Settings>);
+
+#[cfg(test)]
+mod tests {
+    use super::Settings;
+
+    #[test]
+    fn bilingual_settings_survive_serialization_and_legacy_defaults() {
+        let legacy: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.source_language, "en");
+        assert_eq!(legacy.target_language, "zh");
+        let settings: Settings = serde_json::from_str(r#"{
+            "source_language":"zh", "target_language":"en",
+            "translation_type":"two_way", "language_a":"zh", "language_b":"en",
+            "language_hints_strict":true, "endpoint_delay":1500
+        }"#).unwrap();
+        let saved = serde_json::to_string(&settings).unwrap();
+        let restored: Settings = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.source_language, "zh");
+        assert_eq!(restored.target_language, "en");
+        assert_eq!(restored.translation_type, "two_way");
+        assert_eq!(restored.language_a, "zh");
+        assert_eq!(restored.language_b, "en");
+        assert!(restored.language_hints_strict);
+        assert_eq!(restored.endpoint_delay, 1500);
+    }
+}
