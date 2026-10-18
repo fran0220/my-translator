@@ -9,10 +9,16 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use futures_util::{SinkExt, StreamExt};
 use http::Request;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "tauri-host")]
 use std::collections::HashMap;
+#[cfg(not(feature = "tauri-host"))]
+use std::sync::mpsc::Sender as Channel;
+#[cfg(feature = "tauri-host")]
 use std::sync::Mutex;
 use std::time::Duration;
+#[cfg(feature = "tauri-host")]
 use tauri::ipc::Channel;
+#[cfg(feature = "tauri-host")]
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Instant};
@@ -21,6 +27,7 @@ use tokio_tungstenite::{
     tungstenite::{client::IntoClientRequest, Message},
 };
 
+#[cfg(feature = "tauri-host")]
 use crate::audio::resampler::UpsamplerTo24k;
 
 const OPENAI_REALTIME_URL: &str =
@@ -73,18 +80,21 @@ pub enum OpenAiEvent {
     },
 }
 
+#[cfg(feature = "tauri-host")]
 struct Session {
     audio_tx: mpsc::UnboundedSender<Vec<u8>>,
     stop_tx: mpsc::UnboundedSender<()>,
     upsampler: Mutex<UpsamplerTo24k>,
 }
 
+#[cfg(feature = "tauri-host")]
 #[derive(Default)]
 pub struct OpenAiState {
     sessions: Mutex<HashMap<u64, Session>>,
     next_id: Mutex<u64>,
 }
 
+#[cfg(feature = "tauri-host")]
 #[tauri::command]
 pub async fn openai_realtime_start(
     config: OpenAiRealtimeConfig,
@@ -151,6 +161,7 @@ pub async fn openai_realtime_start(
     Ok(session_id)
 }
 
+#[cfg(feature = "tauri-host")]
 #[tauri::command]
 pub async fn openai_realtime_send_audio(
     session_id: u64,
@@ -172,6 +183,7 @@ pub async fn openai_realtime_send_audio(
     Ok(())
 }
 
+#[cfg(feature = "tauri-host")]
 #[tauri::command]
 pub async fn openai_realtime_stop(
     session_id: u64,
@@ -232,10 +244,15 @@ fn connection_request(cfg: &OpenAiRealtimeConfig) -> Result<Request<()>, String>
     Ok(request)
 }
 
-async fn run_session(
+#[cfg(feature = "tauri-host")]
+type AudioReceiver = mpsc::UnboundedReceiver<Vec<u8>>;
+#[cfg(not(feature = "tauri-host"))]
+type AudioReceiver = mpsc::Receiver<Vec<u8>>;
+
+pub async fn run_session(
     cfg: OpenAiRealtimeConfig,
-    mut audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    mut stop_rx: mpsc::UnboundedReceiver<()>,
+    audio_rx: AudioReceiver,
+    stop_rx: mpsc::UnboundedReceiver<()>,
     event_ch: Channel<OpenAiEvent>,
 ) -> Result<(), String> {
     let request = connection_request(&cfg)?;
@@ -245,18 +262,34 @@ async fn run_session(
         .map_err(|_| "OpenAI 连接超时".to_string())?
         .map_err(|_| "OpenAI 连接失败，请检查密钥和网络".to_string())?;
 
+    run_connected(cfg, audio_rx, stop_rx, event_ch, ws_stream).await
+}
+
+pub(crate) async fn run_connected(
+    cfg: OpenAiRealtimeConfig,
+    mut audio_rx: AudioReceiver,
+    mut stop_rx: mpsc::UnboundedReceiver<()>,
+    event_ch: Channel<OpenAiEvent>,
+    ws_stream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Result<(), String> {
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
     // Send session.update once connected
     let session_update = build_session_update(&cfg);
-    ws_sink
-        .send(Message::Text(session_update.into()))
-        .await
-        .map_err(|e| format!("send session.update: {}", e))?;
+    timeout(
+        Duration::from_secs(3),
+        ws_sink.send(Message::Text(session_update.into())),
+    )
+    .await
+    .map_err(|_| "OpenAI 配置发送超时")?
+    .map_err(|e| format!("send session.update: {}", e))?;
 
     let mut ready = false;
     let ack_deadline = Instant::now() + Duration::from_secs(15);
     let mut drain_deadline = None;
+    let mut finish_sent = false;
 
     loop {
         tokio::select! {
@@ -264,9 +297,15 @@ async fn run_session(
 
             _ = stop_rx.recv(), if drain_deadline.is_none() => {
                 audio_rx.close();
+                #[cfg(feature = "tauri-host")]
                 while audio_rx.try_recv().is_ok() {}
                 let deadline = Instant::now() + Duration::from_secs(3);
                 drain_deadline = Some(deadline);
+            }
+
+            _ = std::future::ready(()), if drain_deadline.is_some() && (ready || cfg!(feature = "tauri-host")) && audio_rx.is_empty() && !finish_sent => {
+                finish_sent = true;
+                let deadline = drain_deadline.unwrap();
                 tokio::time::timeout_at(deadline, ws_sink.send(Message::Text(
                     serde_json::json!({"type": "session.close"}).to_string().into()
                 ))).await.map_err(|_| "结束 OpenAI 会话超时".to_string())?
@@ -276,16 +315,19 @@ async fn run_session(
             _ = tokio::time::sleep_until(drain_deadline.unwrap_or(ack_deadline)),
                 if drain_deadline.is_some() || !ready => {
                 if drain_deadline.is_none() { return Err("等待 OpenAI 会话确认超时".into()); }
-                break;
+                return Err("OpenAI 收尾超时，尾句可能不完整".into());
             }
 
-            Some(audio_chunk) = audio_rx.recv(), if ready && drain_deadline.is_none() => {
+            Some(audio_chunk) = audio_rx.recv(), if ready && !finish_sent => {
                 let b64 = B64.encode(&audio_chunk);
                 let evt = serde_json::json!({
                     "type": "session.input_audio_buffer.append",
                     "audio": b64,
                 });
-                if let Err(e) = ws_sink.send(Message::Text(evt.to_string().into())).await {
+                if let Err(e) = tokio::time::timeout_at(
+                    drain_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(3)),
+                    ws_sink.send(Message::Text(evt.to_string().into()))
+                ).await.map_err(|_| "OpenAI 音频发送超时")? {
                     return Err(format!("send audio: {}", e));
                 }
             }
@@ -300,15 +342,25 @@ async fn run_session(
                                 ready = true;
                                 let _ = event_ch.send(OpenAiEvent::Status { state: "ready".into(), message: None });
                             }
-                            Some("session.closed" | "error") => break,
+                            Some("session.closed") => {
+                                if !cfg!(feature = "tauri-host") && !finish_sent {
+                                    return Err("OpenAI 在音频收尾前结束，尾句可能不完整".into());
+                                }
+                                break;
+                            }
+                            Some("error") => return Err("OpenAI 服务返回错误，尾句可能不完整".into()),
                             _ => {}
                         }
                     }
                     Some(Ok(Message::Binary(_))) => {}
-                    Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Close(_))) | None => {
+                        if !cfg!(feature = "tauri-host") {
+                            return Err("OpenAI 在最终确认前断开，尾句可能不完整".into());
+                        }
+                        break;
+                    }
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(format!("ws error: {}", e)),
-                    None => break,
                 }
             }
         }

@@ -8,12 +8,20 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use futures_util::{SinkExt, StreamExt};
 use http::Request;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "tauri-host")]
 use std::collections::HashMap;
+#[cfg(not(feature = "tauri-host"))]
+use std::sync::mpsc::Sender as Channel;
+#[cfg(feature = "tauri-host")]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+#[cfg(feature = "tauri-host")]
 use tauri::ipc::Channel;
+#[cfg(feature = "tauri-host")]
 use tauri::{AppHandle, Manager, State};
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+#[cfg(feature = "tauri-host")]
+use tokio::sync::Semaphore;
+use tokio::sync::{mpsc, OwnedSemaphorePermit};
 use tokio::time::{timeout, Instant};
 use tokio_tungstenite::{connect_async_with_config, tungstenite::Message};
 
@@ -22,7 +30,7 @@ const QWEN_REALTIME_URL: &str =
 const QIANWEN_REALTIME_URL: &str =
     "wss://maas.qianwenaiapi.com/api-ws/v1/realtime?model=qwen3.8-livetranslate-flash-realtime";
 // Three seconds of PCM16, 16 kHz mono; cap both bytes and tiny/empty packets.
-const MAX_QUEUED_AUDIO_BYTES: usize = 16_000 * 2 * 3;
+pub const MAX_QUEUED_AUDIO_BYTES: usize = 16_000 * 2 * 3;
 const IO_TIMEOUT: Duration = Duration::from_secs(3);
 
 fn default_service() -> String {
@@ -71,18 +79,21 @@ pub enum QwenEvent {
     },
 }
 
+#[cfg(feature = "tauri-host")]
 struct Session {
     audio_tx: mpsc::Sender<(Vec<u8>, OwnedSemaphorePermit)>,
     audio_budget: Arc<Semaphore>,
     stop_tx: mpsc::Sender<()>,
 }
 
+#[cfg(feature = "tauri-host")]
 #[derive(Default)]
 pub struct QwenState {
     sessions: Mutex<HashMap<u64, Session>>,
     next_id: Mutex<u64>,
 }
 
+#[cfg(feature = "tauri-host")]
 #[tauri::command]
 pub async fn qwen_realtime_start(
     config: QwenRealtimeConfig,
@@ -139,6 +150,7 @@ pub async fn qwen_realtime_start(
     Ok(session_id)
 }
 
+#[cfg(feature = "tauri-host")]
 #[tauri::command]
 pub async fn qwen_realtime_send_audio(
     session_id: u64,
@@ -171,6 +183,7 @@ pub async fn qwen_realtime_send_audio(
     Ok(())
 }
 
+#[cfg(feature = "tauri-host")]
 #[tauri::command]
 pub async fn qwen_realtime_stop(
     session_id: u64,
@@ -183,10 +196,10 @@ pub async fn qwen_realtime_stop(
     Ok(())
 }
 
-async fn run_session(
+pub async fn run_session(
     cfg: QwenRealtimeConfig,
-    mut audio_rx: mpsc::Receiver<(Vec<u8>, OwnedSemaphorePermit)>,
-    mut stop_rx: mpsc::Receiver<()>,
+    audio_rx: mpsc::Receiver<(Vec<u8>, OwnedSemaphorePermit)>,
+    stop_rx: mpsc::Receiver<()>,
     event_ch: Channel<QwenEvent>,
 ) -> Result<(), String> {
     let (url, host) = service_endpoint(&cfg.service)?;
@@ -204,14 +217,37 @@ async fn run_session(
         .body(())
         .map_err(|_| "无法创建千问连接请求，请检查 API 密钥".to_string())?;
 
-    let (ws_stream, _) = tokio::select! {
-        _ = stop_rx.recv() => return Ok(()),
-        result = timeout(Duration::from_secs(15), connect_async_with_config(request, None, true)) => {
-            result.map_err(|_| "千问连接超时".to_string())?
-                .map_err(|_| "千问连接失败，请检查所选服务、API 密钥及网络".to_string())?
-        }
+    let connect = timeout(
+        Duration::from_secs(15),
+        connect_async_with_config(request, None, true),
+    );
+    #[cfg(feature = "tauri-host")]
+    let (result, stop_rx) = {
+        let mut stop_rx = stop_rx;
+        let result = tokio::select! {
+            _ = stop_rx.recv() => return Ok(()),
+            result = connect => result,
+        };
+        (result, stop_rx)
     };
+    #[cfg(not(feature = "tauri-host"))]
+    let result = connect.await;
+    let (ws_stream, _) = result
+        .map_err(|_| "千问连接超时".to_string())?
+        .map_err(|_| "千问连接失败，请检查所选服务、API 密钥及网络".to_string())?;
 
+    run_connected(cfg, audio_rx, stop_rx, event_ch, ws_stream).await
+}
+
+pub(crate) async fn run_connected(
+    cfg: QwenRealtimeConfig,
+    mut audio_rx: mpsc::Receiver<(Vec<u8>, OwnedSemaphorePermit)>,
+    mut stop_rx: mpsc::Receiver<()>,
+    event_ch: Channel<QwenEvent>,
+    ws_stream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Result<(), String> {
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
     let session_update = build_session_update(&cfg);
@@ -227,6 +263,7 @@ async fn run_session(
     let mut ready = false;
     let ack_deadline = Instant::now() + Duration::from_secs(15);
     let mut drain_deadline = None;
+    let mut finish_sent = false;
 
     // Guard: response.text.done can fire twice for one response when both text
     // and audio_transcript streams complete. With modalities=["text"] this
@@ -238,12 +275,18 @@ async fn run_session(
             biased;
 
             _ = stop_rx.recv(), if drain_deadline.is_none() => {
-                // Do not submit queued microphone data after stop. Already sent
-                // audio is finalized by the server, without manual commits.
+                // Native capture flushes its final partial block before stop.
+                // Preserve the existing Tauri host's discard-on-stop policy.
                 audio_rx.close();
+                #[cfg(feature = "tauri-host")]
                 while audio_rx.try_recv().is_ok() {}
                 let deadline = Instant::now() + Duration::from_secs(15);
                 drain_deadline = Some(deadline);
+            }
+
+            _ = std::future::ready(()), if drain_deadline.is_some() && (ready || cfg!(feature = "tauri-host")) && audio_rx.is_empty() && !finish_sent => {
+                finish_sent = true;
+                let deadline = drain_deadline.unwrap();
                 tokio::time::timeout_at(deadline, ws_sink.send(Message::Text(
                     serde_json::json!({"type": "session.finish"}).to_string().into()
                 ))).await.map_err(|_| "结束千问会话超时".to_string())?
@@ -266,7 +309,7 @@ async fn run_session(
                             Err(_) => continue,
                         };
                         let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                        if kind == "session.updated" && !ready && drain_deadline.is_none() {
+                        if kind == "session.updated" && !ready {
                             ready = true;
                             let _ = event_ch.send(QwenEvent::Status {
                                 state: "ready".into(), message: None,
@@ -277,22 +320,29 @@ async fn run_session(
                         if let Some(event) = map_server_event(value, modern, &mut last_done_response_id) {
                             let _ = event_ch.send(event);
                         }
+                        if !cfg!(feature = "tauri-host") && (failed || (finished && !finish_sent)) {
+                            return Err("千问服务异常结束，尾句可能不完整".into());
+                        }
                         if finished || failed { break; }
                     }
                     Some(Ok(Message::Binary(_))) => {}
-                    Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Close(_))) | None => {
+                        if !cfg!(feature = "tauri-host") {
+                            return Err("千问在最终确认前断开，尾句可能不完整".into());
+                        }
+                        break;
+                    }
                     Some(Ok(_)) => {}
                     Some(Err(_)) => return Err("千问实时连接中断".into()),
-                    None => break,
                 }
             }
 
-            Some((pcm, _permit)) = audio_rx.recv(), if ready && drain_deadline.is_none() => {
+            Some((pcm, _permit)) = audio_rx.recv(), if ready && !finish_sent => {
                 let evt = serde_json::json!({
                     "type": "input_audio_buffer.append",
                     "audio": B64.encode(&pcm),
                 });
-                timeout(IO_TIMEOUT, ws_sink.send(Message::Text(evt.to_string().into())))
+                tokio::time::timeout_at(drain_deadline.unwrap_or_else(|| Instant::now() + IO_TIMEOUT), ws_sink.send(Message::Text(evt.to_string().into())))
                     .await.map_err(|_| "发送千问音频超时".to_string())?
                     .map_err(|_| "发送千问音频失败".to_string())?;
             }

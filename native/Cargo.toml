@@ -1,0 +1,49 @@
+[package]
+name = "translator-native"
+version = "0.9.1"
+edition = "2024"
+publish = false
+
+[features]
+default = ["desktop"]
+desktop = ["dep:gpui-kit"]
+private-team = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("tauri-host"))'] }
+
+[[bin]]
+name = "translator-native"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[dependencies]
+gpui-kit = { version = "=0.7.3", optional = true }
+env_logger = "0.11"
+indexmap = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+cpal = "0.15"
+rubato = "0.16"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+base64 = "0.22"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+http = "1"
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"] }
+
+[build-dependencies]
+serde_json = "1"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = ["Win32_Media_Audio", "Win32_System_Com", "Win32_Foundation"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = "1.5"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+strip = true

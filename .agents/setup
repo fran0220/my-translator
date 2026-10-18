@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Native GPUI Linux build/inspection prerequisites. Does not read credentials,
+# authenticate, launch services, or change the existing Tauri release workflow.
+packages=(libasound2-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
+  libx11-xcb-dev libvulkan-dev libssl-dev libfontconfig1-dev clang cmake pkg-config
+  xvfb xdotool x11-utils openbox fonts-noto-cjk)
+missing=()
+for package in "${packages[@]}"; do
+  if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then
+    missing+=("$package")
+  fi
+done
+if ((${#missing[@]})); then
+  sudo apt-get update -qq
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}"
+fi
+if [[ ! -x "$HOME/.cargo/bin/rustup" ]]; then
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+fi
+"$HOME/.cargo/bin/rustup" component add rustfmt
+"$HOME/.cargo/bin/cargo" fetch --locked --manifest-path native/Cargo.toml
