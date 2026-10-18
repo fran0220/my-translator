@@ -3,12 +3,21 @@ fn main() {
     // On macOS 15+, it's in the dyld shared cache at /usr/lib/swift/
     // The crate's build script adds @rpath references, but we need to ensure
     // the linker can resolve them. Adding /usr/lib/swift as rpath covers modern macOS.
-    println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "macos" {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+    }
 
     // Load repo-root .env (gitignored) so secrets stay out of source. Exposes
     // GOOGLE_FREE_TTS_KEY to the crate via option_env!. Missing .env is fine —
     // the Google Free provider degrades to "not configured".
-    load_env_secret("GOOGLE_FREE_TTS_KEY");
+    if target_os == "windows" {
+        // Distributed Windows builds must not embed a developer's API key,
+        // even when it is present in the build environment.
+        println!("cargo:rustc-env=GOOGLE_FREE_TTS_KEY=");
+    } else {
+        load_env_secret("GOOGLE_FREE_TTS_KEY");
+    }
 
     tauri_build::build()
 }
