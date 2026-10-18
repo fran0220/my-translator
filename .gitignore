@@ -25,6 +25,7 @@ dist-ssr
 
 # Rust build artifacts
 src-tauri/target/
+src-tauri/webview2-fixed/
 target-private-team/
 src-tauri/target-private-team/
 

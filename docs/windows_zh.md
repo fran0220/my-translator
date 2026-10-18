@@ -22,6 +22,16 @@ npm run build -- --bundles nsis --config src-tauri/tauri.windows.conf.json
 
 安装包位于 `src-tauri/target/release/bundle/nsis/`。首次构建需要联网下载 npm/Rust 依赖及打包工具。Windows 覆盖配置选择 `SimpChinese` 安装界面、仅生成 NSIS，并关闭 `createUpdaterArtifacts`，因此无需 `TAURI_SIGNING_PRIVATE_KEY`。Tauri 在 Windows 上也会自动合并该平台配置。
 
+### 随应用携带 WebView2（不依赖系统 Runtime 注册）
+
+从 [微软官方网站](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) 下载 **Fixed Version / x64** 的 CAB（本次验证版本为 `155.0.4283.62`），使用 Windows `expand.exe -F:*` 解包。将解包后的运行时目录放为 `src-tauri/webview2-fixed/`，确保其下直接包含 `msedgewebview2.exe`，不要再嵌套一层版本目录。该目录已忽略，不提交二进制运行时。
+
+```powershell
+npm run build -- --features private-team --bundles nsis --config src-tauri/tauri.windows.fixed-runtime.conf.json
+```
+
+内部版仍须按下节安全提供构建环境凭据。此额外配置使用 Tauri 的 `fixedRuntime` 模式；安装后运行时位于应用目录的 `webview2-fixed/`，不需要用户另行安装 Evergreen，也不卸载系统 WebView2。普通构建流程不受影响。安装包会显著变大；固定版不会自动更新，后续安全更新需重新下载受支持版本并重新打包。不承诺 Windows 7/8 兼容性。
+
 ## API Key 与隐私
 
 普通安装包不附带开发者的 API Key。启动后，请在设置中自行填写所选服务需要的个人 API Key；费用、额度和权限由自己的服务账号承担。不要将密钥提交到仓库或填写到工作流文件中。Windows 构建不会读取 `.env` 中的 `GOOGLE_FREE_TTS_KEY`，也会清空编译环境中的该密钥；Google Free TTS 同样需要在设置中输入自己的有效密钥，否则不可用。
