@@ -2215,7 +2215,7 @@ class App {
     async start() {
         const settings = settingsManager.get();
         this.translationMode = settings.translation_mode || 'soniox';
-        console.log('[App] start() called, translation_mode:', this.translationMode, 'settings:', JSON.stringify(settings));
+        console.log('[App] start() called, translation_mode:', this.translationMode);
 
         // Local MLX needs macOS Apple Silicon — block here (option is selectable
         // but can't actually run on other platforms) instead of crashing.

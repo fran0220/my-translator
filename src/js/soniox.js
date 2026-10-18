@@ -62,7 +62,7 @@ export class SonioxClient {
 
         if (!apiKey) {
             this._setStatus('error');
-            this.onError?.('API key is required. Please add it in Settings.');
+            this.onError?.('需要 API 密钥，请先在设置中填写。');
             return;
         }
 
@@ -84,7 +84,7 @@ export class SonioxClient {
         } catch (err) {
             console.error('[Soniox] Failed to create WebSocket:', err);
             this._setStatus('error');
-            this.onError?.(`Failed to create WebSocket: ${err.message}`);
+            this.onError?.(`无法建立 WebSocket 连接：${err.message}`);
             return;
         }
 
@@ -187,7 +187,7 @@ export class SonioxClient {
         newWs.onerror = (event) => {
             if (newWs._isOld) return;
             console.error('[Soniox] WebSocket ERROR:', event);
-            this.onError?.('WebSocket error occurred');
+            this.onError?.('WebSocket 连接出错');
         };
 
         newWs.onclose = (event) => {
@@ -214,18 +214,18 @@ export class SonioxClient {
             if (event.code === 1000) {
                 this._setStatus('disconnected');
             } else if (event.code === 1006) {
-                this._tryReconnect('Connection lost unexpectedly');
+                this._tryReconnect('连接意外中断');
             } else if (event.code === 4001 || event.code === 4003) {
                 this._setStatus('error');
-                this.onError?.('Invalid API key. Please check your key in Settings.');
+                this.onError?.('API 密钥无效，请在设置中检查。');
             } else if (event.code === 4029) {
                 this._setStatus('error');
-                this.onError?.('Rate limit exceeded. Please wait and try again.');
+                this.onError?.('请求超过限额，请稍后重试。');
             } else if (event.code === 4002) {
                 this._setStatus('error');
-                this.onError?.('Subscription issue. Please check your Soniox account.');
+                this.onError?.('订阅异常，请检查 Soniox 账户。');
             } else {
-                this._tryReconnect(`Connection closed (code: ${event.code})`);
+                this._tryReconnect(`连接已关闭（代码：${event.code}）`);
             }
         };
     }
@@ -469,12 +469,12 @@ export class SonioxClient {
 
     _handleApiError(data) {
         const code = data.error_code || 0;
-        const message = data.error_message || 'Unknown API error';
+        const message = data.error_message || '未知 API 错误';
 
         console.error('Soniox API error:', code, message);
 
         if (code === 408) {
-            this._tryReconnect('Request timeout');
+            this._tryReconnect('请求超时');
             return;
         }
 
