@@ -44,6 +44,7 @@ export class SonioxClient {
         this.onOriginal = null;       // (text, speaker, language) => {}
         this.onTranslation = null;    // (text) => {}
         this.onProvisional = null;    // (text, speaker, language) => {}
+        this.onTranslationProvisional = null; // (text) => {} — replaceable snapshot
         this.onStatusChange = null;   // (status) => {}
         this.onError = null;          // (error) => {}
         this.onConfidence = null;     // (avgConfidence) => {}
@@ -271,6 +272,7 @@ export class SonioxClient {
         let originalText = '';
         let translationText = '';
         let provisionalText = '';
+        let translationProvisional = '';
         let hasEnd = false;
         let speaker = null;
         let language = null;
@@ -307,6 +309,8 @@ export class SonioxClient {
             } else if (token.translation_status === 'translation') {
                 if (token.is_final) {
                     translationText += token.text;
+                } else {
+                    translationProvisional += token.text;
                 }
             } else if (token.translation_status === 'none') {
                 // Third-language speech in two-way mode: treat as original (untranslated)
@@ -334,6 +338,7 @@ export class SonioxClient {
             this.onTranslation?.(translationText);
             this._addToHistory(translationText);
         }
+        this.onTranslationProvisional?.(translationProvisional);
 
         // Emit provisional text with speaker + language
         if (provisionalText.trim()) {

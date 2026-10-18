@@ -9,6 +9,7 @@ const DEFAULT_SETTINGS = {
   soniox_api_key: '',
   openai_api_key: '',
   qwen_api_key: '',
+  qwen_service: 'qianwen',
   source_language: 'en',
   target_language: 'zh',
   translation_type: 'one_way',

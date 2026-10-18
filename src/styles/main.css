@@ -317,7 +317,7 @@ body {
 
 .compact-mode:hover #drag-region.compact-hidden {
   display: flex !important;
-  position: absolute;
+  position: relative;
   top: 0;
   left: 0;
   right: 0;
@@ -331,10 +331,8 @@ body {
   padding-top: 4px;
 }
 
-/* Auto-hide/compact also collapses the Live status + action rows.
-   Hover peeks back only the ACTION row (bottom) — the status row stays
-   hidden because the drag region overlays the same top strip (z-99)
-   and the two would stack garbled/unclickable. */
+/* Auto-hide/compact collapses the status + action rows. Hover reveals the
+   toolbar in normal flow so it cannot cover the first bilingual caption line. */
 .live-status-row.chrome-hidden,
 .live-action-row.chrome-hidden {
   display: none;
@@ -674,6 +672,8 @@ body {
 
 .dual-view .transcript-flow {
   display: flex;
+  flex: 1;
+  min-width: 0;
   gap: 0;
   height: 100%;
   min-height: 0;

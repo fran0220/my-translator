@@ -608,6 +608,10 @@ class App {
             }
         };
 
+        sonioxClient.onTranslationProvisional = text => {
+            this.transcriptUI.setTranslationProvisional(text);
+        };
+
         sonioxClient.onStatusChange = (status) => {
             this._updateStatus(status);
         };
@@ -803,6 +807,7 @@ class App {
         if (openaiKeyInput) openaiKeyInput.value = s.openai_api_key || '';
         const qwenKeyInput = document.getElementById('input-qwen-key');
         if (qwenKeyInput) qwenKeyInput.value = s.qwen_api_key || '';
+        document.getElementById('select-qwen-service').value = s.qwen_service || 'qianwen';
         document.getElementById('select-source-lang').value = s.source_language || 'auto';
         document.getElementById('select-target-lang').value = s.target_language || 'vi';
         document.getElementById('select-translation-mode').value = s.translation_mode || 'soniox';
@@ -940,6 +945,7 @@ class App {
             soniox_api_key: document.getElementById('input-api-key').value.trim(),
             openai_api_key: document.getElementById('input-openai-key')?.value.trim() || '',
             qwen_api_key: document.getElementById('input-qwen-key')?.value.trim() || '',
+            qwen_service: document.getElementById('select-qwen-service').value,
             source_language: document.getElementById('select-source-lang').value,
             target_language: document.getElementById('select-target-lang').value,
             translation_mode: document.getElementById('select-translation-mode').value,
@@ -1957,8 +1963,8 @@ class App {
         const ENGINE_HINTS = {
             soniox: '云端 · 70 多种语言 · 约 0.12 美元/小时',
             local: '离线 · 免费 · 约 3–4 秒延迟',
-            openai: '云端 · 13 种语言 · 仅文字字幕',
-            qwen: '云端 · 60 多种语言 · 仅文字 · 免费预览 · 请选择源语言',
+            openai: '云端 · 双语增量字幕 · 默认静音；服务端仍生成并计费语音',
+            qwen: '中国站 3.8：原文 + 译文增量字幕 · 新加坡旧版：仅译文 · 按服务计费',
         };
         if (hintSoniox) {
             hintSoniox.textContent = ENGINE_HINTS[mode] || '';
@@ -2213,6 +2219,7 @@ class App {
     // ─── Start/Stop ────────────────────────────────────────
 
     async start() {
+        if (this._pausePromise) return; // Do not replace a client while its final captions drain.
         const settings = settingsManager.get();
         this.translationMode = settings.translation_mode || 'soniox';
         console.log('[App] start() called, translation_mode:', this.translationMode);
@@ -2397,10 +2404,7 @@ class App {
         this._updateStatus('connecting');
         const { QwenRealtimeClient } = await import('./qwen-realtime-client.js');
 
-        // Live Flash is translation-only (no source transcript). Force the
-        // single-panel translation view; dual-panel would render an empty
-        // source column.
-        this.transcriptUI.provider = 'qwen';
+        this.transcriptUI.provider = settings.qwen_service === 'dashscope_intl' ? 'qwen-legacy' : 'qwen';
 
         this.qwenClient = new QwenRealtimeClient();
 
@@ -2411,9 +2415,14 @@ class App {
         this.qwenClient.onProvisional = (text) => {
             this.transcriptUI.setProvisional(text, null, null);
         };
+        this.qwenClient.onSourceProvisional = text => {
+            this.transcriptUI.setSourceProvisional(text);
+        };
         this.qwenClient.onSegment = (sourceText, translatedText) => {
+            if (sourceText) this.transcriptUI.addOriginal(sourceText, null, null);
             this.transcriptUI.addTranslation(translatedText);
-            sessionStore.addSegment('', translatedText || '');
+            sessionStore.addSegment(sourceText || '', translatedText || '');
+            this.transcriptUI.clearSourceProvisional();
             this.transcriptUI.clearProvisional();
         };
         this.qwenClient.onError = (code, msg) => {
@@ -2441,6 +2450,7 @@ class App {
                     : 'en';
             await this.qwenClient.connect({
                 apiKey: settings.qwen_api_key,
+                service: settings.qwen_service || 'qianwen',
                 sourceLanguage: sourceLang,
                 targetLanguage: settings.target_language,
             });
@@ -2787,9 +2797,20 @@ class App {
     // file open. The next Start appends a new chunk to the same file. Finalizing
     // into a new file is stopSession()'s job.
     async pause() {
+        if (this._pausePromise) return this._pausePromise;
+        this._pausePromise = this._pauseAndPersist().finally(() => {
+            this._pausePromise = null;
+            this._updateStartButton();
+            this._setEnginePillLocked(false);
+        });
+        this._updateStartButton();
+        return this._pausePromise;
+    }
+
+    async _pauseAndPersist() {
         this.isRunning = false;
         this._updateStartButton();
-        this._setEnginePillLocked(false);
+        this._setEnginePillLocked(true);
 
         // Stop audio capture
         try {
@@ -2832,6 +2853,8 @@ class App {
 
         // Keep transcript visible — don't clear
         this.transcriptUI.clearProvisional();
+        this.transcriptUI.clearSourceProvisional();
+        this.transcriptUI.setTranslationProvisional('');
 
         // Stop TTS
         elevenLabsTTS.disconnect();
@@ -2863,7 +2886,7 @@ class App {
     // fresh session so the next Start writes a new file pair. Keeps the
     // transcript on screen. Never wipes in-memory data on a failed save.
     async stopSession() {
-        if (this.isRunning) await this.pause();
+        if (this.isRunning || this._pausePromise) await this.pause();
 
         if (sessionStore.isEmpty()) {
             this._showToast('没有可保存的内容', 'success');
@@ -2893,25 +2916,23 @@ class App {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    // Persist the session on the way out. endSession() first (cheap local write
-    // that finalizes the file), then best-effort engine teardown via pause().
-    // Both are idempotent, so running this more than once is harmless.
+    // Drain trailing captions before finalizing the session file.
     async _flushOnExit() {
-        try { await sessionStore.endSession(); } catch (e) { console.error('[App] exit flush (endSession) failed:', e); }
         try { await this.pause(); } catch (e) { console.error('[App] exit flush (pause) failed:', e); }
+        try { await sessionStore.endSession(); } catch (e) { console.error('[App] exit flush (endSession) failed:', e); }
     }
 
     // Two close routes, one flush:
     //  • window ✕ / appWindow.close() → onCloseRequested (frontend)
     //  • Cmd+Q / Dock quit → Rust RunEvent::ExitRequested emits 'app-exit-requested'
-    // Both flush (raced against a 3s deadline so a hung engine can't wedge the
+    // Both flush (20s allows Qwen's 15s drain plus persistence; a hung engine cannot wedge the
     // app) then exit_app, which force-exits the process cleanly in Rust.
     async _bindCloseHooks() {
         await this.appWindow.onCloseRequested(async (event) => {
+            event.preventDefault();
             if (this._closing) return;
             this._closing = true;
-            event.preventDefault();
-            await Promise.race([this._flushOnExit(), this._sleep(3000)]);
+            await Promise.race([this._flushOnExit(), this._sleep(20000)]);
             try {
                 await invoke('exit_app');
             } catch {
@@ -2922,7 +2943,7 @@ class App {
         await this.appWindow.listen('app-exit-requested', async () => {
             if (this._closing) return;
             this._closing = true;
-            await Promise.race([this._flushOnExit(), this._sleep(3000)]);
+            await Promise.race([this._flushOnExit(), this._sleep(20000)]);
             try { await invoke('exit_app'); } catch {}
         });
     }
@@ -2936,7 +2957,8 @@ class App {
         iconPlay.style.display = this.isRunning ? 'none' : 'block';
         iconStop.style.display = this.isRunning ? 'block' : 'none';
         const label = document.getElementById('btn-start-label');
-        if (label) label.textContent = this.isRunning ? '停止' : '开始';
+        btn.disabled = !!this._pausePromise;
+        if (label) label.textContent = this._pausePromise ? '正在收尾…' : this.isRunning ? '停止' : '开始';
 
         // Pause is only actionable while running. (Don't also gate on isStarting:
         // start() calls this while isStarting is still true, and the click handler

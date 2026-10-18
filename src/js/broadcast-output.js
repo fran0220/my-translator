@@ -1,4 +1,4 @@
-/** Only finalized display-buffer text crosses this channel, never settings. */
+/** Display-buffer and live caption snapshots only; never settings or keys. */
 const CHANNEL = 'my-translator-broadcast-v1';
 const MAX_CHARS = 600;
 let disposePrevious;
@@ -24,7 +24,10 @@ export function initBroadcastOutput(transcriptUI) {
         const recent = (field) => segments.map(segment =>
             typeof segment[field] === 'string' ? segment[field].slice(-MAX_CHARS) : ''
         ).filter(Boolean).join('\n').slice(-MAX_CHARS);
-        channel.postMessage({ type: 'snapshot', source: recent('original'), translation: recent('translation') });
+        const live = transcriptUI.liveCaptions;
+        const source = (recent('original') + live.source).slice(-MAX_CHARS);
+        const translation = (recent('translation') + live.translation).slice(-MAX_CHARS);
+        channel.postMessage({ type: 'snapshot', source, translation });
     }
 
     try {
@@ -83,7 +86,7 @@ export function initBroadcastOutput(transcriptUI) {
         if (event.target.closest?.('#btn-broadcast')) void open();
     };
     document.addEventListener('click', onClick);
-    const timer = setInterval(snapshot, 500); // Full snapshots double as heartbeats; [] clears output.
+    const timer = setInterval(snapshot, 100); // Replace live hypotheses; also heartbeat/clear.
     const onPageHide = () => channel?.postMessage({ type: 'clear' });
     window.addEventListener('pagehide', onPageHide);
     const dispose = () => {

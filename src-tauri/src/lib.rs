@@ -154,7 +154,8 @@ pub fn run() {
                     }
                     let handle = app_handle.clone();
                     std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        // Allow the 15s Qwen caption drain and the final local save.
+                        std::thread::sleep(std::time::Duration::from_secs(20));
                         EXIT_ALLOWED.store(true, Ordering::SeqCst);
                         handle.exit(0);
                     });

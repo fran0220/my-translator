@@ -194,21 +194,21 @@
           <button class="engine-card" data-engine-class="openai" type="button">
             <div class="engine-card-icon">⚡</div>
             <div class="engine-card-name">OpenAI Realtime</div>
-            <div class="engine-card-meta">约 $4/小时 · 仅文本</div>
+            <div class="engine-card-meta">双语增量字幕 · 默认静音</div>
             <ul class="engine-card-feats">
               <li>13 种语言</li>
               <li>连续增量字幕</li>
-              <li>最地道的翻译表达</li>
+              <li>静音不免除服务端语音费用</li>
             </ul>
           </button>
           <button class="engine-card" data-engine-class="qwen" type="button">
             <div class="engine-card-icon">🌏</div>
             <div class="engine-card-name">Qwen LiveTranslate Flash</div>
-            <div class="engine-card-meta">免费预览 · 仅文本</div>
+            <div class="engine-card-meta">中国站 3.8 · 双语增量字幕</div>
             <ul class="engine-card-feats">
               <li>60 多种语言</li>
-              <li>首个词元响应最快（约 4 秒）</li>
-              <li>Alibaba DashScope（新加坡）</li>
+              <li>逐步显示原文与译文</li>
+              <li>可选新加坡旧版（仅译文）</li>
             </ul>
           </button>
         </div>
@@ -354,8 +354,8 @@
           </select>
           <p class="hint" id="hint-mode-soniox">云端 · 70 多种语言 · 约 $0.12/小时</p>
           <p class="hint" id="hint-mode-local" style="display:none">离线 · 免费 · 约 3–4 秒延迟</p>
-          <p class="hint" id="hint-mode-openai" style="display:none">云端 · 13 种语言 · 仅文本字幕</p>
-          <p class="hint" id="hint-mode-qwen" style="display:none">云端 · 60 多种语言 · 仅文本 · 免费预览 · 请选择源语言</p>
+          <p class="hint" id="hint-mode-openai" style="display:none">双语增量字幕 · 默认静音；服务端仍生成并计费语音</p>
+          <p class="hint" id="hint-mode-qwen" style="display:none">中国站 3.8：双语增量字幕 · 新加坡旧版：仅译文</p>
           <div id="openai-cost-warning" class="cost-warning" style="display:none">
             ⚠️ 约 $4/小时 — 费用远高于 Soniox。费用由您的 OpenAI 账户承担。
           </div>
@@ -396,8 +396,13 @@
         </div>
 
         <div class="settings-section" id="section-qwen-key" style="display:none">
+          <label class="field-label" for="select-qwen-service">千问服务 / 模型</label>
+          <select id="select-qwen-service">
+            <option value="qianwen">中国站 · Qwen 3.8 LiveTranslate（双语增量）</option>
+            <option value="dashscope_intl">新加坡 · Qwen 3 LiveTranslate（仅译文）</option>
+          </select>
           <span class="field-label">
-            Qwen (DashScope) API 密钥
+            所选千问服务的 API 密钥
             <span id="key-status-qwen" class="key-status"></span>
           </span>
           <div class="input-group">
@@ -408,7 +413,7 @@
               </svg>
             </button>
           </div>
-          <p class="hint">获取 DashScope 密钥：<a href="#" id="link-qwen">bailian.console.alibabacloud.com</a> · 免费预览</p>
+          <p class="hint">中国站使用 maas.qianwenaiapi.com，新加坡使用 dashscope-intl.aliyuncs.com。请填写对应服务的密钥；切换服务不会自动迁移密钥权限。中国站自动识别原文语言，按所选目标语言翻译。</p>
         </div>
 
         <div class="settings-section" id="section-languages">

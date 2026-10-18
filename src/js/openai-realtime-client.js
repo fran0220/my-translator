@@ -26,6 +26,7 @@ export class OpenAiRealtimeClient {
         // translation finalize on independent cadences, so a queue keeps pairs aligned.
         this._pendingSourceFinals = [];
         this._muted = false;
+        this._closed = false;
     }
 
     setMuted(muted) {
@@ -96,14 +97,21 @@ export class OpenAiRealtimeClient {
     async disconnect() {
         if (!this.isConnected) return;
         this.isConnected = false;
-        this.flushPending();
+        const closed = new Promise(resolve => { this._resolveClosed = resolve; });
+        const timer = setTimeout(() => this._handleEvent({ type: 'closed', reason: 'drain_timeout' }), 4000);
         try {
             await invoke('openai_realtime_stop', { sessionId: this.sessionId });
+            await closed;
         } catch {}
-        this.outputQueue?.flush();
+        finally {
+            clearTimeout(timer);
+            this._handleEvent({ type: 'closed', reason: 'stopped' });
+            this.outputQueue?.flush();
+        }
     }
 
     _handleEvent(evt) {
+        if (this._closed) return;
         switch (evt.type) {
             case 'status':
                 this.onStatusChange(evt.state, evt.message);
@@ -142,7 +150,12 @@ export class OpenAiRealtimeClient {
                 this.onError(evt.code, evt.message);
                 break;
             case 'closed':
+                this._closed = true;
                 this.isConnected = false;
+                this.flushPending();
+                this.onProvisional('');
+                this.onSourceProvisional('');
+                this._resolveClosed?.();
                 this.onClosed(evt.reason);
                 break;
         }

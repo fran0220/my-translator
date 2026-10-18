@@ -28,8 +28,8 @@ export class TranscriptUI {
         // Source-side provisional (OpenAI Realtime: source ASR is separate from target).
         // Soniox leaves this empty; its provisionalText carries the source-language ASR.
         this.sourceProvisionalText = '';
-        // Provider hint — Soniox puts source-language in provisionalText; OpenAI
-        // splits source/target streams; Qwen Live Flash emits target-only.
+        this.translationProvisionalText = ''; // Soniox's separate non-final target tokens.
+        // Soniox uses provisionalText for source; OpenAI and Qwen use it for target.
         // Backing field for the `provider` getter/setter below.
         this._provider = 'soniox';
         this.currentSpeaker = null; // Track current speaker to detect changes
@@ -43,11 +43,11 @@ export class TranscriptUI {
 
     set provider(value) {
         this._provider = value;
-        // Qwen Live Flash has no source channel — strip the dual-view CSS class
+        // Legacy Qwen has no source channel — strip the dual-view CSS class
         // so the overlay reverts to single-column layout even if viewMode='dual'.
         const overlay = document.getElementById('overlay-view');
         if (overlay) {
-            const wantsDual = this.viewMode === 'dual' && value !== 'qwen';
+            const wantsDual = this.viewMode === 'dual' && value !== 'qwen-legacy';
             overlay.classList.toggle('dual-view', wantsDual);
         }
     }
@@ -69,7 +69,7 @@ export class TranscriptUI {
             this.viewMode = viewMode;
             const overlay = document.getElementById('overlay-view');
             if (overlay) {
-                const wantsDual = viewMode === 'dual' && this._provider !== 'qwen';
+                const wantsDual = viewMode === 'dual' && this._provider !== 'qwen-legacy';
                 overlay.classList.toggle('dual-view', wantsDual);
             }
             this._render();
@@ -173,11 +173,26 @@ export class TranscriptUI {
         this._render();
     }
 
+    setTranslationProvisional(text) {
+        this.translationProvisionalText = text || '';
+        this._render();
+    }
+
+    // Shared routing for the main display and broadcast window, even when
+    // translated tokens arrive before source transcription.
+    get liveCaptions() {
+        const separateSource = ['openai', 'qwen', 'qwen-legacy'].includes(this.provider);
+        return {
+            source: separateSource ? this.sourceProvisionalText : this.provisionalText,
+            translation: separateSource ? this.provisionalText : this.translationProvisionalText,
+        };
+    }
+
     /**
      * Check if there is any content to display
      */
     hasContent() {
-        return this.segments.length > 0 || this.provisionalText ||
+        return this.segments.length > 0 || this.liveCaptions.source || this.liveCaptions.translation ||
             !!this.container.querySelector('.listening-indicator');
     }
 
@@ -200,6 +215,8 @@ export class TranscriptUI {
         this.segments = [];
         this.sessionLog = [];
         this.provisionalText = '';
+        this.sourceProvisionalText = '';
+        this.translationProvisionalText = '';
         this.provisionalSpeaker = null;
         this.provisionalLanguage = null;
         this.currentSpeaker = null;
@@ -365,6 +382,8 @@ export class TranscriptUI {
         this.container.innerHTML = '';
         this.segments = [];
         this.provisionalText = '';
+        this.sourceProvisionalText = '';
+        this.translationProvisionalText = '';
         this.provisionalSpeaker = null;
         this.provisionalLanguage = null;
         this.currentSpeaker = null;
@@ -400,10 +419,10 @@ export class TranscriptUI {
         this._ensureContent();
         this._trimSegments();
 
-        // Qwen Live Flash is translation-only (no source transcript channel),
+        // Legacy Qwen is translation-only (no source transcript channel),
         // so force single-panel even when the user picked dual view — otherwise
         // the source panel sits empty / shows dim provisional noise.
-        if (this.viewMode === 'dual' && this.provider !== 'qwen') {
+        if (this.viewMode === 'dual' && this.provider !== 'qwen-legacy') {
             this._renderDual();
         } else {
             this._renderSingle();
@@ -449,9 +468,12 @@ export class TranscriptUI {
             // as bright translated text. Qwen Live Flash is translation-only —
             // provisionalText is the target language too. Soniox uses
             // provisionalText for source ASR → keep dim italic.
-            const isTargetStream = this.sourceProvisionalText || this.provider === 'qwen';
+            const isTargetStream = ['openai', 'qwen', 'qwen-legacy'].includes(this.provider);
             const cls = isTargetStream ? 'seg-translated' : 'seg-provisional';
-            html += `<div class="seg-block"><div class="${cls}">${this._esc(this.provisionalText)}</div></div>`;
+            html += `<div class="seg-block"><div class="${cls}">${this._esc(this.provisionalText.slice(-this.maxChars))}</div></div>`;
+        }
+        if (this.translationProvisionalText) {
+            html += `<div class="seg-block"><div class="seg-translated">${this._esc(this.translationProvisionalText.slice(-this.maxChars))}</div></div>`;
         }
 
         this.contentEl.innerHTML = html;
@@ -508,10 +530,10 @@ export class TranscriptUI {
         // - OpenAI Realtime: sourceProvisionalText is source ASR; provisionalText is target.
         // Use explicit provider flag — checking !!sourceProvisionalText fails when
         // whisper lags behind translation, dumping target deltas into the source panel.
-        if (this.sourceProvisionalText || this.provisionalText) {
-            const usingOpenAi = this.provider === 'openai';
-            const srcText = usingOpenAi ? this.sourceProvisionalText : this.provisionalText;
-            const tgtText = usingOpenAi ? this.provisionalText : '';
+        const live = this.liveCaptions;
+        if (live.source || live.translation) {
+            const srcText = live.source.slice(-this.maxChars);
+            const tgtText = live.translation.slice(-this.maxChars);
             if (srcText) srcHtml += `<div class="seg-text pending">${this._esc(srcText)}</div>`;
             tgtHtml += `<div class="seg-text pending">${tgtText ? this._esc(tgtText) : '...'}</div>`;
         }
