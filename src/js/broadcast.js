@@ -1,15 +1,12 @@
-const source = document.getElementById('source');
 const translation = document.getElementById('translation');
 let lastHeartbeat = 0;
 let fontSize = 40;
 let channel;
 let togglingFullscreen = false;
 
-function render(original = '', translated = '') {
-    source.textContent = original;
+function render(translated = '') {
     translation.textContent = translated;
     // Always retain the newest lines when text exceeds the capture area.
-    source.scrollTop = source.scrollHeight;
     translation.scrollTop = translation.scrollHeight;
 }
 
@@ -19,10 +16,9 @@ try {
         if (data?.type === 'clear') {
             lastHeartbeat = 0;
             render();
-        } else if (data?.type === 'snapshot' && typeof data.source === 'string'
-            && typeof data.translation === 'string') {
+        } else if (data?.type === 'snapshot' && typeof data.translation === 'string') {
             lastHeartbeat = Date.now();
-            render(data.source.slice(-600), data.translation.slice(-600));
+            render(data.translation.slice(-600));
         }
     };
     channel.postMessage({ type: 'request' });
@@ -59,7 +55,6 @@ document.addEventListener('keydown', (event) => {
         event.preventDefault();
         fontSize = Math.max(16, Math.min(120, fontSize + (['+', '='].includes(event.key) ? 4 : -4)));
         document.documentElement.style.setProperty('--caption-size', `${fontSize}px`);
-        source.scrollTop = source.scrollHeight;
         translation.scrollTop = translation.scrollHeight;
     } else if (event.key.toLowerCase() === 'f' && !event.repeat) {
         event.preventDefault();
@@ -67,7 +62,6 @@ document.addEventListener('keydown', (event) => {
     }
 });
 window.addEventListener('resize', () => {
-    source.scrollTop = source.scrollHeight;
     translation.scrollTop = translation.scrollHeight;
 });
 window.addEventListener('pageshow', () => channel?.postMessage({ type: 'request' }));

@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 
 let stopEvents = () => {};
 globalThis.window = {
@@ -140,4 +142,33 @@ test('broadcast includes pending text on the correct side, replaces it with fina
         await tick();
         assert.deepEqual(messages.at(-1), { type: 'snapshot', source: '', translation: '' });
     } finally { dispose(); }
+});
+
+test('broadcast window renders only incremental translation, never source, and clears on silence', () => {
+    const elements = { source: { textContent: '' }, translation: { textContent: '' } };
+    let channel, heartbeat;
+    let now = 1000;
+    runInNewContext(readFileSync(new URL('../src/js/broadcast.js', import.meta.url), 'utf8'), {
+        document: { getElementById: id => elements[id], addEventListener() {} },
+        window: { addEventListener() {} },
+        Date: { now: () => now },
+        setInterval: callback => { heartbeat = callback; },
+        BroadcastChannel: class { constructor() { channel = this; } postMessage() {} },
+    });
+    const send = translation => channel.onmessage({ data: { type: 'snapshot', source: 'Do not show this original.', translation } });
+    send('请保留');
+    assert.equal(elements.translation.textContent, '请保留');
+    send('请保留二号机位。');
+    assert.equal(elements.translation.textContent, '请保留二号机位。');
+    assert.equal(elements.source.textContent, '');
+    send('');
+    assert.equal(elements.translation.textContent, '');
+    assert.equal(elements.source.textContent, '');
+    send('Keep camera two.');
+    channel.onmessage({ data: { type: 'clear' } });
+    assert.equal(elements.translation.textContent, '');
+    send('Keep camera two.');
+    now += 5001;
+    heartbeat();
+    assert.equal(elements.translation.textContent, '');
 });
