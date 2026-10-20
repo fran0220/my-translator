@@ -299,7 +299,9 @@ pub(crate) async fn run_connected(
                 audio_rx.close();
                 #[cfg(feature = "tauri-host")]
                 while audio_rx.try_recv().is_ok() {}
-                let deadline = Instant::now() + Duration::from_secs(3);
+                // Overall drain budget, including queued input and remaining output.
+                // Engineering bound, not an API SLA; session.closed ends it early.
+                let deadline = Instant::now() + Duration::from_secs(10);
                 drain_deadline = Some(deadline);
             }
 
@@ -378,8 +380,8 @@ fn build_session_update(cfg: &OpenAiRealtimeConfig) -> String {
     // - Output language goes under audio.output.language
     // The translation endpoint does NOT support text-only modality config —
     // both `session.modalities` and `session.output_modalities` are rejected.
-    // For "mute", we drop output_audio events client-side instead (see
-    // run_session — audio_output flag suppresses AudioChunk forwarding).
+    // AudioChunk is still forwarded; JS gates playback via setMuted().
+    // audio_output is not a server-side generation or drain-time control.
     let session = serde_json::json!({
         "audio": {
             "input": {
@@ -480,6 +482,128 @@ fn handle_server_event(text: &str, event_ch: &Channel<OpenAiEvent>, audio_output
             // Log unknown event types so we can discover server-side names we
             // haven't mapped yet (e.g. turn lifecycle around speech pauses).
             eprintln!("[openai-realtime] unhandled event type: {}", other);
+        }
+    }
+}
+
+#[cfg(all(test, not(feature = "tauri-host")))]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn stop_waits_for_closed_beyond_three_seconds_but_audio_cannot_extend_ten() {
+        for acknowledge in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let (client, server) = tokio::join!(
+                connect_async(format!("ws://{}", listener.local_addr().unwrap())),
+                async { tokio_tungstenite::accept_async(listener.accept().await.unwrap().0).await }
+            );
+            let (socket, _) = client.unwrap();
+            let mut server = server.unwrap();
+            let cfg = OpenAiRealtimeConfig {
+                api_key: String::new(),
+                source_language: "en".into(),
+                target_language: "zh".into(),
+                voice: None,
+                proxy_url: String::new(),
+                proxy_token: String::new(),
+                audio_output: false,
+            };
+            let (audio, audio_rx) = mpsc::channel(2);
+            let (stop, stop_rx) = mpsc::unbounded_channel();
+            let (events, rx) = std::sync::mpsc::channel();
+            let task = tokio::spawn(run_connected(cfg, audio_rx, stop_rx, events, socket));
+            server.next().await.unwrap().unwrap(); // session.update
+            server
+                .send(Message::Text(
+                    json!({"type":"session.updated"}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            timeout(Duration::from_secs(2), async {
+                while !rx.try_iter().any(
+                    |event| matches!(event, OpenAiEvent::Status { state, .. } if state == "ready"),
+                ) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            stop.send(()).unwrap();
+            let close = server.next().await.unwrap().unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(close.to_text().unwrap()).unwrap()
+                    ["type"],
+                "session.close"
+            );
+            assert!(
+                audio.try_send(vec![7; 9600]).is_err(),
+                "no input accepted after close"
+            );
+            let started = Instant::now();
+            for _ in 0..if acknowledge { 4 } else { 9 } {
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(1)).await;
+                tokio::time::resume();
+                assert!(
+                    !task.is_finished(),
+                    "audio draining is allowed until the overall deadline"
+                );
+                server
+                    .send(Message::Text(
+                        json!({"type":"session.output_audio.delta","delta":"AAA="})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+                timeout(Duration::from_secs(1), async {
+                    loop {
+                        if rx
+                            .try_iter()
+                            .any(|event| matches!(event, OpenAiEvent::AudioChunk { .. }))
+                        {
+                            break;
+                        }
+                        assert!(!task.is_finished());
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+            if acknowledge {
+                server
+                    .send(Message::Text(
+                        json!({"type":"session.closed"}).to_string().into(),
+                    ))
+                    .await
+                    .unwrap();
+                timeout(Duration::from_secs(1), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    started.elapsed() < Duration::from_secs(6),
+                    "closed must return early, not wait ten seconds"
+                );
+            } else {
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(1)).await;
+                tokio::time::resume();
+                assert_eq!(
+                    timeout(Duration::from_secs(1), task)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap_err(),
+                    "OpenAI 收尾超时，尾句可能不完整"
+                );
+            }
+            // Neither the late input attempt nor draining output causes another append.
+            assert!(!matches!(server.next().await, Some(Ok(Message::Text(_)))));
         }
     }
 }

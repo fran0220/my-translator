@@ -119,6 +119,32 @@ test('OpenAI append-only captions remain live without done; stop drains trailing
     assert.equal(closes, 1);
 });
 
+test('OpenAI JS guard preserves late drain events and expires only after backend budget plus one second', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    stopEvents = () => {};
+    for (const acknowledge of [true, false]) {
+        const client = new OpenAiRealtimeClient();
+        const reasons = [], segments = [];
+        client.onClosed = reason => reasons.push(reason);
+        client.onSegment = (...pair) => segments.push(pair);
+        await client.connect({ apiKey: 'placeholder', targetLanguage: 'zh' });
+        const closed = client.disconnect();
+        t.mock.timers.tick(10000);
+        assert.deepEqual(reasons, [], 'must not mask a backend still draining');
+        client.channel.onmessage({ type: 'transcript', text: '尾句', is_final: false });
+        if (acknowledge) {
+            client.channel.onmessage({ type: 'closed', reason: 'session_ended' });
+        } else {
+            t.mock.timers.tick(999);
+            assert.deepEqual(reasons, []);
+            t.mock.timers.tick(1);
+        }
+        await closed;
+        assert.deepEqual(segments, [['', '尾句']]);
+        assert.deepEqual(reasons, [acknowledge ? 'session_ended' : 'drain_timeout']);
+    }
+});
+
 test('Soniox replaces target hypotheses and removes them when finalized', () => {
     let socket;
     globalThis.WebSocket = class { constructor() { socket = this; } };
