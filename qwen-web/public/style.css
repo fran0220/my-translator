@@ -99,3 +99,19 @@ footer{margin-top:auto;color:#5f7089;font-size:11px;line-height:1.6;display:grid
   .transcripts[data-view=target]{grid-template-rows:1fr}
   .pane+.pane{border-left:0;border-top:1px solid var(--line)}
 }
+
+/* Engine switch, rotation option, live metrics, language tags */
+.field{display:flex;flex-direction:column;gap:6px;font-size:12px;color:#b6c3d4}
+.engine{width:100%}
+.engine button{flex:1;padding:8px 0;font-size:13px}
+.check.rotate{align-items:flex-start}
+.check.rotate input{margin-top:2px}
+.check.rotate span{display:flex;flex-direction:column;gap:2px}
+.state{display:flex;flex-direction:column;gap:3px;min-width:0}
+#metrics{font:11px ui-monospace,monospace;color:#7fd8b4;padding-left:19px}
+#metrics[data-level=warn]{color:var(--warn)}
+#metrics[data-level=bad]{color:var(--danger)}
+.transcript p[data-lang]:before{content:attr(data-lang);display:inline-block;font:600 10px ui-monospace,monospace;letter-spacing:1px;color:#8ab7c5;border:1px solid #2f4357;border-radius:4px;padding:1px 4px;margin-right:8px;vertical-align:.25em}
+#error:not(:empty):after{content:"  ✕";opacity:.6}
+@media(max-width:820px){#error{top:12px;bottom:auto;left:12px;right:12px;width:auto}}
+.segmented button[aria-pressed=true]:disabled{opacity:1;cursor:default}

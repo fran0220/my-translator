@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from '../server.mjs';
-import { Transcript } from '../public/transcript.js';
+import { Transcript, SonioxTranscript } from '../public/transcript.js';
 
 test('authentication, CSRF, fixed upstream, body limits and SDP quotas', async t => {
   let calls = 0;
@@ -44,4 +44,75 @@ test('incremental source/translation preserve separate items, deduplicate and fi
   t.accept({ ...first, event_id: 'three', item_id: 'next', delta: '再见' });
   assert.equal(t.text(false), '你好，世界。\n再见');
   assert.equal(t.text(true), 'Hello world');
+});
+
+test('Soniox temporary keys: authenticated only, long-lived key stays server-side, quota enforced', async t => {
+  const bodies = [];
+  const server = createServer({ key: 'qwen-secret', sonioxKey: 'soniox-secret', password: '0000', origin: 'https://test.example', fetcher: async (url, options) => {
+    assert.equal(url, 'https://api.soniox.com/v1/auth/temporary-api-key');
+    assert.equal(options.headers.Authorization, 'Bearer soniox-secret');
+    bodies.push(JSON.parse(options.body));
+    return Response.json({ api_key: 'snx_temp_abc', expires_at: '2026-01-01T00:00:00Z' }, { status: 201 });
+  } });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/qwen/api/`;
+  const request = (path, body, headers = {}) => fetch(url + path, { method: 'POST', headers: { Origin: 'https://test.example', ...headers }, body });
+  assert.equal((await request('soniox-key', '{}')).status, 401);
+  const login = await request('login', '{"password":"0000"}');
+  const { csrf, engines } = await login.json();
+  assert.deepEqual(engines, { qwen: true, soniox: true });
+  const headers = { Cookie: login.headers.get('set-cookie').split(';')[0], 'X-CSRF-Token': csrf };
+  const minted = await request('soniox-key', '{}', headers);
+  const text = await minted.text();
+  assert.equal(minted.status, 200);
+  assert.equal(JSON.parse(text).api_key, 'snx_temp_abc');
+  assert.ok(!text.includes('soniox-secret'));
+  assert.equal(bodies[0].usage_type, 'transcribe_websocket');
+  assert.equal(bodies[0].single_use, true);
+  assert.ok(bodies[0].expires_in_seconds <= 60);
+  for (let i = 1; i < 12; i++) assert.equal((await request('soniox-key', '{}', headers)).status, 200);
+  assert.equal((await request('soniox-key', '{}', headers)).status, 429);
+  const page = await fetch(url.replace('api/', ''));
+  assert.match(page.headers.get('content-security-policy'), /connect-src 'self' wss:\/\/stt-rt\.soniox\.com;/);
+});
+test('Soniox engine is reported unavailable without a server key', async t => {
+  const server = createServer({ key: 'qwen-secret', sonioxKey: '', password: '0000', origin: 'https://test.example', fetcher: async () => assert.fail('must not call upstream') });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/qwen/api/`;
+  const login = await fetch(url + 'login', { method: 'POST', headers: { Origin: 'https://test.example' }, body: '{"password":"0000"}' });
+  const { csrf, engines } = await login.json();
+  assert.equal(engines.soniox, false);
+  const res = await fetch(url + 'soniox-key', { method: 'POST', headers: { Origin: 'https://test.example', Cookie: login.headers.get('set-cookie').split(';')[0], 'X-CSRF-Token': csrf }, body: '{}' });
+  assert.equal(res.status, 503);
+});
+test('Soniox utterances: endpoint split, late translation, provisional replacement, interleaved sockets, clear', () => {
+  const t = new SonioxTranscript();
+  const tok = (text, extra = {}) => ({ text, is_final: true, translation_status: 'original', language: 'en', ...extra });
+  const a = t.cursor(), b = t.cursor();
+  t.accept(a, { tokens: [tok('Hello'), tok(' there', { is_final: false }), tok('你好', { translation_status: 'translation', is_final: false, language: 'zh' })] });
+  assert.deepEqual(t.parts(true), ['Hello there']);
+  assert.deepEqual(t.parts(false), ['你好']);
+  // Non-final tokens are replaced by the next response, not appended.
+  t.accept(a, { tokens: [tok(' there.'), tok('<end>'), tok('你好。', { translation_status: 'translation', language: 'zh' })] });
+  assert.deepEqual(t.parts(true), ['Hello there.']);
+  assert.deepEqual(t.parts(false), ['你好。']);
+  // The replacement socket opens a new utterance while the old one is still draining its translation.
+  t.accept(b, { tokens: [tok('我们开始吧', { language: 'zh' })] });
+  t.accept(a, { tokens: [tok('！', { translation_status: 'translation', language: 'zh' })] });
+  t.accept(b, { tokens: [tok("Let's begin", { translation_status: 'translation' })] });
+  assert.deepEqual(t.parts(true), ['Hello there.', '我们开始吧']);
+  assert.deepEqual(t.parts(false), ['你好。！', "Let's begin"]);
+  assert.deepEqual(t.entries(true).map(x => x.lang), ['en', 'zh']);
+  assert.equal(t.text(false), "你好。！\nLet's begin");
+  assert.match(t.recent(6), /我们开始吧$/);
+  t.accept(b, { tokens: [tok('<end>'), tok('Good evening.'), tok(' 大家晚上好。', { translation_status: 'translation' }), tok(' 今天 见', { translation_status: 'translation' })] });
+  assert.equal(t.parts(false).at(-1), '大家晚上好。今天见');
+  assert.equal(t.parts(true).at(-1), 'Good evening.');
+  t.clear();
+  t.accept(a, { tokens: [tok('late', { translation_status: 'translation' })] });
+  t.accept(b, { tokens: [tok('Next')] });
+  assert.deepEqual(t.parts(true), ['Next']);
+  assert.deepEqual(t.parts(false), ['late']);
 });

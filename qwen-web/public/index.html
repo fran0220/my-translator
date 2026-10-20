@@ -3,15 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Qwen · 实时翻译台</title>
+<title>实时翻译台</title>
 <link rel="stylesheet" href="./style.css">
 </head>
 <body>
 <section id="login">
   <div class="login-card">
-    <small>QWEN / WEBRTC</small>
+    <small>QWEN · SONIOX</small>
     <h1>实时翻译台</h1>
-    <p>内部测试使用。音频通过 WebRTC 直接发送至 Qwen，API 密钥仅保存在服务器。</p>
+    <p>内部测试使用。音频由浏览器直接发送至 Qwen 或 Soniox，长期 API 密钥仅保存在服务器。</p>
     <form id="loginForm">
       <label>访问密码<input id="password" type="password" autocomplete="current-password" required autofocus></label>
       <button>进入翻译台 →</button>
@@ -22,12 +22,20 @@
 <div id="workspace" hidden>
   <aside class="panel">
     <header class="brand">
-      <div><small>QWEN / WEBRTC</small><h1>实时翻译台</h1></div>
+      <div><small>QWEN · SONIOX</small><h1>实时翻译台</h1></div>
       <button id="logout" class="ghost" hidden>退出</button>
     </header>
 
     <div class="group">
       <h2>翻译</h2>
+      <div class="field">
+        <span class="label">引擎</span>
+        <div class="segmented engine" role="group" aria-label="翻译引擎">
+          <button data-engine="qwen" aria-pressed="true">Qwen</button>
+          <button data-engine="soniox" aria-pressed="false">Soniox</button>
+        </div>
+        <span class="hint" id="engineHint"></span>
+      </div>
       <label>方向<select id="language"><option value="zh">英文 → 中文</option><option value="en">中文 → 英文</option></select></label>
       <label>音频来源<select id="source"><option value="mic">麦克风</option><option value="display">共享标签页 / 系统音频</option></select></label>
       <div class="device-row">
@@ -45,7 +53,7 @@
       </div>
       <button id="test" class="ghost wide">本地试音（不连接模型）</button>
       <label class="check"><input id="monitor" type="checkbox">本地监听（建议戴耳机）</label>
-      <label class="check" title="重连不等待句尾、不补发历史，连接间隙可能丢失语音"><input id="reconnect" type="checkbox" checked>每 5 分钟硬重连</label>
+      <label class="check rotate"><input id="reconnect" type="checkbox" checked><span>自动无缝切换会话<span class="hint" id="rotateHint"></span></span></label>
     </div>
 
     <details class="group">
@@ -63,7 +71,10 @@
 
   <main class="stage">
     <header class="stage-bar">
-      <div id="status" role="status" data-state="idle">就绪 · 尚未采音</div>
+      <div class="state">
+        <div id="status" role="status" data-state="idle">就绪 · 尚未采音</div>
+        <div id="metrics" hidden title="延迟：模型已处理的音频落后实时的时长；上行：浏览器尚未发出的音频"></div>
+      </div>
       <div class="tools">
         <div class="segmented" role="group" aria-label="显示模式">
           <button data-view="both" aria-pressed="true">双语</button>
