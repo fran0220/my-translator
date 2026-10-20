@@ -149,7 +149,7 @@ export class SonioxClient {
                 console.log('[Soniox] Seamless switch: closing old WebSocket');
                 try {
                     if (oldWs.readyState === WebSocket.OPEN) {
-                        oldWs.send(new ArrayBuffer(0)); // graceful close signal
+                        oldWs.send(''); // Soniox EOS is an empty text frame, not empty audio
                     }
                     oldWs._isOld = true; // mark so onclose doesn't trigger reconnect
                     oldWs.close(1000, 'Session reset');
@@ -254,7 +254,7 @@ export class SonioxClient {
         if (this.ws) {
             try {
                 if (this.ws.readyState === WebSocket.OPEN) {
-                    this.ws.send(new ArrayBuffer(0));
+                    this.ws.send('');
                 }
                 this.ws.close(1000, 'User disconnected');
             } catch (err) {

@@ -139,6 +139,37 @@ test('Soniox replaces target hypotheses and removes them when finalized', () => 
     assert.equal(live, '');
 });
 
+test('Soniox rotation and manual disconnect terminate with empty text, not empty audio', t => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+    const sockets = [];
+    const previous = globalThis.WebSocket;
+    globalThis.WebSocket = class {
+        static OPEN = 1;
+        readyState = 1;
+        frames = [];
+        constructor() { sockets.push(this); }
+        send(frame) { this.frames.push(frame); }
+        close() { this.readyState = 3; }
+    };
+    const client = new SonioxClient();
+    try {
+        client.connect({ apiKey: 'placeholder' });
+        sockets[0].onopen();
+        const pcm = new Uint8Array([1, 2]).buffer;
+        client.sendAudio(pcm);
+        assert.equal(sockets[0].frames.at(-1), pcm);
+        t.mock.timers.tick(180000);
+        assert.equal(sockets.length, 2);
+        sockets[1].onopen();
+        assert.equal(sockets[0].frames.at(-1), '');
+        client.disconnect();
+        assert.equal(sockets[1].frames.at(-1), '');
+    } finally {
+        client.disconnect();
+        globalThis.WebSocket = previous;
+    }
+});
+
 test('broadcast includes pending text on the correct side, replaces it with finals, and clears every stream', async () => {
     const messages = [];
     globalThis.BroadcastChannel = class {
