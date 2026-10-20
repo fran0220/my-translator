@@ -3,10 +3,11 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
+const sonioxKeyUrl = 'https://api.soniox.com/v1/auth/temporary-api-key';
 const upstream = 'https://maas.qianwenaiapi.com/api/v1/webrtc/realtime?model=qwen3.8-livetranslate-flash-realtime';
-export function createServer({ key = process.env.DASHSCOPE_API_KEY, password = process.env.QWEN_PASSWORD, origin = process.env.PUBLIC_ORIGIN, fetcher = fetch } = {}) {
+export function createServer({ key = process.env.DASHSCOPE_API_KEY, sonioxKey = process.env.SONIOX_API_KEY, password = process.env.QWEN_PASSWORD, origin = process.env.PUBLIC_ORIGIN, fetcher = fetch } = {}) {
   if (!key || !password || !origin) throw new Error('Required server environment is missing');
-  const sessions = new Map(), limits = new Map();
+  const sessions = new Map(), limits = new Map(), engines = { qwen: true, soniox: !!sonioxKey };
   let pending = 0;
   const limit = (id, max, window) => {
     const now = Date.now();
@@ -21,7 +22,7 @@ export function createServer({ key = process.env.DASHSCOPE_API_KEY, password = p
   }, 60000).unref();
   const server = http.createServer(async (req, res) => {
     const send = (code, body, type = 'application/json') => {
-      res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" });
+      res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' wss://stt-rt.soniox.com; media-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" });
       res.end(type === 'application/json' ? JSON.stringify(body) : body);
     };
     try {
@@ -35,6 +36,7 @@ export function createServer({ key = process.env.DASHSCOPE_API_KEY, password = p
         if (req.headers.origin !== origin) return send(403, { error: 'Origin rejected' });
         if (path !== '/qwen/api/login' && (!authed || req.headers['x-csrf-token'] !== session.csrf)) return send(401, { error: '请重新登录' });
         if (path === '/qwen/api/login' && (!limit(`login:${ip}`, 10, 60000) || !limit('login:global', 100, 60000))) return send(429, { error: '登录过于频繁，请稍后再试' });
+        if (path === '/qwen/api/soniox-key' && (!limit(`sx:${id}`, 12, 60000) || !limit(`sx-ip:${ip}`, 24, 60000) || !limit('sx:global', 300, 3600000))) return send(429, { error: 'Soniox 连接配额已达上限，请稍后重试' });
         if (path === '/qwen/api/sdp' && (!limit(`sdp:${id}`, 8, 60000) || !limit(`sdp-ip:${ip}`, 16, 60000) || !limit('sdp:global', 60, 3600000) || pending >= 4)) return send(429, { error: '连接配额已达上限，请稍后重试' });
         const max = path === '/qwen/api/sdp' ? 65536 : 1024;
         let body = '', size = 0;
@@ -52,12 +54,21 @@ export function createServer({ key = process.env.DASHSCOPE_API_KEY, password = p
           const token = randomBytes(32).toString('hex'), csrf = randomBytes(32).toString('hex');
           sessions.set(token, { csrf, until: Date.now() + 8 * 3600000 });
           res.setHeader('Set-Cookie', `qwen_session=${token}; Path=/qwen/; HttpOnly; Secure; SameSite=Strict; Max-Age=28800`);
-          return send(200, { csrf });
+          return send(200, { csrf, engines });
         }
         if (path === '/qwen/api/logout') {
           sessions.delete(id);
           res.setHeader('Set-Cookie', 'qwen_session=; Path=/qwen/; HttpOnly; Secure; SameSite=Strict; Max-Age=0');
           return send(200, { ok: true });
+        }
+        // The long-lived Soniox key never leaves the server; the browser gets a key valid for one stream, opened within 30 s.
+        if (path === '/qwen/api/soniox-key') {
+          if (!sonioxKey) return send(503, { error: '服务器未配置 Soniox' });
+          const response = await fetcher(sonioxKeyUrl, { method: 'POST', headers: { Authorization: `Bearer ${sonioxKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ usage_type: 'transcribe_websocket', expires_in_seconds: 30, single_use: true, max_session_duration_seconds: 18000, client_reference_id: 'translator-web' }), signal: AbortSignal.timeout(10000), redirect: 'error' });
+          if (!response.ok) { await response.body?.cancel(); return send(502, { error: `Soniox 临时密钥申请失败 (HTTP ${response.status})` }); }
+          const { api_key: temp, expires_at } = await response.json();
+          if (typeof temp !== 'string' || !temp.startsWith('snx_temp_')) return send(502, { error: 'Soniox 返回无效临时密钥' });
+          return send(200, { api_key: temp, expires_at });
         }
         if (path === '/qwen/api/sdp') {
           if (req.headers['content-type'] !== 'application/sdp' || !body.startsWith('v=0') || !/\nm=audio /.test(body)) return send(400, { error: 'Invalid audio SDP' });
@@ -73,8 +84,8 @@ export function createServer({ key = process.env.DASHSCOPE_API_KEY, password = p
         return send(404, { error: 'Not found' });
       }
       if (req.method !== 'GET') return send(405, { error: 'Method not allowed' });
-      if (path === '/qwen/api/session') return authed ? send(200, { csrf: session.csrf }) : send(401, { error: '请登录' });
-      const files = { '/qwen/': 'index.html', '/qwen/app.js': 'app.js', '/qwen/style.css': 'style.css', '/qwen/director.html': 'director.html', '/qwen/director.js': 'director.js', '/qwen/transcript.js': 'transcript.js' };
+      if (path === '/qwen/api/session') return authed ? send(200, { csrf: session.csrf, engines }) : send(401, { error: '请登录' });
+      const files = { '/qwen/': 'index.html', '/qwen/app.js': 'app.js', '/qwen/style.css': 'style.css', '/qwen/director.html': 'director.html', '/qwen/director.js': 'director.js', '/qwen/transcript.js': 'transcript.js', '/qwen/qwen.js': 'qwen.js', '/qwen/soniox.js': 'soniox.js', '/qwen/pcm-worklet.js': 'pcm-worklet.js' };
       const file = files[path];
       if (!file) return send(404, { error: 'Not found' });
       const type = file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html';
@@ -90,5 +101,5 @@ export function createServer({ key = process.env.DASHSCOPE_API_KEY, password = p
   return server;
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  createServer().listen(Number(process.env.PORT || 8788), '127.0.0.1', () => console.log('Qwen Web listening on loopback'));
+  createServer().listen(Number(process.env.PORT || 8788), '127.0.0.1', () => console.log(`Translator web listening on loopback (soniox ${process.env.SONIOX_API_KEY ? 'on' : 'off'})`));
 }
