@@ -2482,20 +2482,18 @@ class App {
         }
 
         try {
-            let audioBatchCount = 0;
             const channel = new window.__TAURI__.core.Channel();
-            channel.onmessage = (pcmData) => {
-                audioBatchCount++;
-                if (audioBatchCount <= 3 || audioBatchCount % 50 === 0) {
-                    console.log(`[Qwen capture] batch #${audioBatchCount}, size:`, pcmData?.length || 0);
-                }
-                const bytes = new Uint8Array(pcmData);
-                this.qwenClient.sendAudio(bytes.buffer);
+            const client = this.qwenClient;
+            channel.onmessage = ({ pcm, generation }) => {
+                if (this.qwenClient !== client) return;
+                const bytes = new Uint8Array(pcm);
+                client.sendAudio(bytes.buffer, generation);
             };
             console.log('[Qwen] Starting audio capture, source:', this.currentSource);
             await invoke('start_capture', {
                 source: this.currentSource,
                 channel,
+                qwenSessionId: client.sessionId,
             });
             console.log('[Qwen] start_capture invoked OK');
         } catch (err) {

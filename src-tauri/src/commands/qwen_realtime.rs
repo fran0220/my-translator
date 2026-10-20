@@ -2,7 +2,7 @@
 // PCM16 / 16 kHz / mono input, text-only output, server-managed turns.
 // Modern text/lifecycle events retain item IDs for bilingual frontend alignment.
 // Legacy translation snapshots retain the existing Transcript contract.
-// Audio is bounded and held until session.updated; stop drains session.finish.
+// Audio is bounded and held until session.updated; restart/stop cancel without finalization.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use futures_util::{SinkExt, StreamExt};
@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 #[cfg(not(feature = "tauri-host"))]
 use std::sync::mpsc::Sender as Channel;
-#[cfg(feature = "tauri-host")]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(feature = "tauri-host")]
@@ -59,6 +58,9 @@ pub struct QwenRealtimeConfig {
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum QwenEvent {
+    Restarted {
+        generation: u64,
+    },
     Realtime {
         event: serde_json::Value,
     },
@@ -84,6 +86,7 @@ struct Session {
     audio_tx: mpsc::Sender<(Vec<u8>, OwnedSemaphorePermit)>,
     audio_budget: Arc<Semaphore>,
     stop_tx: mpsc::Sender<()>,
+    generation: Arc<Mutex<u64>>,
 }
 
 #[cfg(feature = "tauri-host")]
@@ -91,6 +94,18 @@ struct Session {
 pub struct QwenState {
     sessions: Mutex<HashMap<u64, Session>>,
     next_id: Mutex<u64>,
+}
+
+#[cfg(feature = "tauri-host")]
+impl QwenState {
+    pub fn capture_generation(&self, id: u64) -> Result<Arc<Mutex<u64>>, String> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|session| session.generation.clone())
+            .ok_or_else(|| "千问会话已结束".into())
+    }
 }
 
 #[cfg(feature = "tauri-host")]
@@ -114,11 +129,13 @@ pub async fn qwen_realtime_start(
 
     let (audio_tx, audio_rx) = mpsc::channel(256);
     let (stop_tx, stop_rx) = mpsc::channel(1);
+    let generation = Arc::new(Mutex::new(0));
 
     let session = Session {
         audio_tx,
         audio_budget: Arc::new(Semaphore::new(MAX_QUEUED_AUDIO_BYTES)),
         stop_tx,
+        generation: generation.clone(),
     };
     state.sessions.lock().unwrap().insert(session_id, session);
 
@@ -130,7 +147,9 @@ pub async fn qwen_realtime_start(
             message: None,
         });
 
-        if let Err(e) = run_session(config, audio_rx, stop_rx, event_ch.clone()).await {
+        if let Err(e) =
+            run_session_generation(config, audio_rx, stop_rx, event_ch.clone(), generation).await
+        {
             let _ = event_ch.send(QwenEvent::Error {
                 code: "session_failed".into(),
                 message: e,
@@ -155,6 +174,7 @@ pub async fn qwen_realtime_start(
 pub async fn qwen_realtime_send_audio(
     session_id: u64,
     pcm: Vec<u8>,
+    generation: Option<u64>,
     state: State<'_, QwenState>,
 ) -> Result<(), String> {
     let sessions = state.sessions.lock().unwrap();
@@ -162,6 +182,10 @@ pub async fn qwen_realtime_send_audio(
         .get(&session_id)
         .ok_or_else(|| "千问实时会话不存在或已结束".to_string())?;
 
+    let current_generation = session.generation.lock().unwrap();
+    if generation.unwrap_or(0) != *current_generation {
+        return Ok(());
+    }
     if pcm.is_empty() {
         return Ok(());
     }
@@ -202,6 +226,16 @@ pub async fn run_session(
     stop_rx: mpsc::Receiver<()>,
     event_ch: Channel<QwenEvent>,
 ) -> Result<(), String> {
+    run_session_generation(cfg, audio_rx, stop_rx, event_ch, Arc::new(Mutex::new(0))).await
+}
+
+pub(crate) async fn run_session_generation(
+    cfg: QwenRealtimeConfig,
+    audio_rx: mpsc::Receiver<(Vec<u8>, OwnedSemaphorePermit)>,
+    stop_rx: mpsc::Receiver<()>,
+    event_ch: Channel<QwenEvent>,
+    generation: Arc<Mutex<u64>>,
+) -> Result<(), String> {
     let (url, host) = service_endpoint(&cfg.service)?;
     let request = Request::builder()
         .uri(url)
@@ -217,40 +251,66 @@ pub async fn run_session(
         .body(())
         .map_err(|_| "无法创建千问连接请求，请检查 API 密钥".to_string())?;
 
-    let connect = timeout(
-        Duration::from_secs(15),
-        connect_async_with_config(request, None, true),
-    );
-    #[cfg(feature = "tauri-host")]
-    let (result, stop_rx) = {
-        let mut stop_rx = stop_rx;
-        let result = tokio::select! {
-            _ = stop_rx.recv() => return Ok(()),
-            result = connect => result,
-        };
-        (result, stop_rx)
-    };
-    #[cfg(not(feature = "tauri-host"))]
-    let result = connect.await;
-    let (ws_stream, _) = result
-        .map_err(|_| "千问连接超时".to_string())?
-        .map_err(|_| "千问连接失败，请检查所选服务、API 密钥及网络".to_string())?;
-
-    run_connected(cfg, audio_rx, stop_rx, event_ch, ws_stream).await
+    run_reconnecting(
+        cfg,
+        audio_rx,
+        stop_rx,
+        event_ch,
+        generation,
+        request,
+        Duration::from_secs(300),
+    )
+    .await
 }
 
-pub(crate) async fn run_connected(
+async fn run_reconnecting(
     cfg: QwenRealtimeConfig,
     mut audio_rx: mpsc::Receiver<(Vec<u8>, OwnedSemaphorePermit)>,
     mut stop_rx: mpsc::Receiver<()>,
     event_ch: Channel<QwenEvent>,
+    generation: Arc<Mutex<u64>>,
+    request: Request<()>,
+    interval: Duration,
+) -> Result<(), String> {
+    let mut restarted = false;
+    loop {
+        // Cancellation surrounds connect, configuration, reads AND pending sends.
+        // Dropping this future drops the old socket; no finish/close-input request.
+        tokio::select! {
+            biased;
+            _ = stop_rx.recv() => return Ok(()),
+            _ = tokio::time::sleep(interval) => {},
+            result = async {
+                let (socket, _) = timeout(Duration::from_secs(15),
+                    connect_async_with_config(request.clone(), None, true)).await
+                    .map_err(|_| "千问连接超时".to_string())?
+                    .map_err(|_| "千问连接失败，请检查所选服务、API 密钥及网络".to_string())?;
+                if restarted { while audio_rx.try_recv().is_ok() {} }
+                connected(&cfg, &mut audio_rx, &event_ch, socket).await
+            } => return result,
+        }
+        let next = {
+            let mut current = generation.lock().unwrap();
+            *current += 1;
+            while audio_rx.try_recv().is_ok() {}
+            *current
+        };
+        let _ = event_ch.send(QwenEvent::Restarted { generation: next });
+        restarted = true;
+    }
+}
+
+async fn connected(
+    cfg: &QwenRealtimeConfig,
+    audio_rx: &mut mpsc::Receiver<(Vec<u8>, OwnedSemaphorePermit)>,
+    event_ch: &Channel<QwenEvent>,
     ws_stream: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
 ) -> Result<(), String> {
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
-    let session_update = build_session_update(&cfg);
+    let session_update = build_session_update(cfg);
     timeout(
         IO_TIMEOUT,
         ws_sink.send(Message::Text(session_update.into())),
@@ -262,8 +322,6 @@ pub(crate) async fn run_connected(
     let modern = cfg.service == "qianwen";
     let mut ready = false;
     let ack_deadline = Instant::now() + Duration::from_secs(15);
-    let mut drain_deadline = None;
-    let mut finish_sent = false;
 
     // Guard: response.text.done can fire twice for one response when both text
     // and audio_transcript streams complete. With modalities=["text"] this
@@ -274,31 +332,8 @@ pub(crate) async fn run_connected(
         tokio::select! {
             biased;
 
-            _ = stop_rx.recv(), if drain_deadline.is_none() => {
-                // Native capture flushes its final partial block before stop.
-                // Preserve the existing Tauri host's discard-on-stop policy.
-                audio_rx.close();
-                #[cfg(feature = "tauri-host")]
-                while audio_rx.try_recv().is_ok() {}
-                let deadline = Instant::now() + Duration::from_secs(15);
-                drain_deadline = Some(deadline);
-            }
-
-            _ = std::future::ready(()), if drain_deadline.is_some() && (ready || cfg!(feature = "tauri-host")) && audio_rx.is_empty() && !finish_sent => {
-                finish_sent = true;
-                let deadline = drain_deadline.unwrap();
-                tokio::time::timeout_at(deadline, ws_sink.send(Message::Text(
-                    serde_json::json!({"type": "session.finish"}).to_string().into()
-                ))).await.map_err(|_| "结束千问会话超时".to_string())?
-                    .map_err(|_| "结束千问会话失败".to_string())?;
-            }
-
-            _ = tokio::time::sleep_until(drain_deadline.unwrap_or(ack_deadline)),
-                if drain_deadline.is_some() || !ready => {
-                if drain_deadline.is_none() {
-                    return Err("等待千问会话确认超时".into());
-                }
-                return Err("千问收尾超时，已显示的字幕会保留，尾句可能不完整".into());
+            _ = tokio::time::sleep_until(ack_deadline), if !ready => {
+                return Err("等待千问会话确认超时".into());
             }
 
             msg = ws_stream.next() => {
@@ -320,38 +355,30 @@ pub(crate) async fn run_connected(
                         if let Some(event) = map_server_event(value, modern, &mut last_done_response_id) {
                             let _ = event_ch.send(event);
                         }
-                        if !cfg!(feature = "tauri-host") && (failed || (finished && !finish_sent)) {
+                        if failed || finished {
                             return Err("千问服务异常结束，尾句可能不完整".into());
                         }
-                        if finished || failed { break; }
                     }
                     Some(Ok(Message::Binary(_))) => {}
                     Some(Ok(Message::Close(_))) | None => {
-                        if !cfg!(feature = "tauri-host") {
-                            return Err("千问在最终确认前断开，尾句可能不完整".into());
-                        }
-                        break;
+                        return Err("千问实时连接已关闭".into());
                     }
                     Some(Ok(_)) => {}
                     Some(Err(_)) => return Err("千问实时连接中断".into()),
                 }
             }
 
-            Some((pcm, _permit)) = audio_rx.recv(), if ready && !finish_sent => {
+            Some((pcm, _permit)) = audio_rx.recv(), if ready => {
                 let evt = serde_json::json!({
                     "type": "input_audio_buffer.append",
                     "audio": B64.encode(&pcm),
                 });
-                tokio::time::timeout_at(drain_deadline.unwrap_or_else(|| Instant::now() + IO_TIMEOUT), ws_sink.send(Message::Text(evt.to_string().into())))
+                timeout(IO_TIMEOUT, ws_sink.send(Message::Text(evt.to_string().into())))
                     .await.map_err(|_| "发送千问音频超时".to_string())?
                     .map_err(|_| "发送千问音频失败".to_string())?;
             }
         }
     }
-
-    // A stalled close handshake must not retain the session indefinitely.
-    let _ = timeout(Duration::from_millis(100), ws_sink.close()).await;
-    Ok(())
 }
 
 fn build_session_update(cfg: &QwenRealtimeConfig) -> String {
@@ -498,6 +525,157 @@ mod tests {
             value["service"] = json!(service);
         }
         serde_json::from_value(value).unwrap()
+    }
+
+    #[cfg(not(feature = "tauri-host"))]
+    #[tokio::test]
+    async fn restart_discards_old_audio_and_events_and_stop_never_finishes_input() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        for service in ["qianwen", "dashscope_intl"] {
+            timeout(Duration::from_secs(5), async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let request = format!("ws://{}", listener.local_addr().unwrap()).into_client_request().unwrap();
+                let (audio, audio_rx) = mpsc::channel(16);
+                let budget = Arc::new(tokio::sync::Semaphore::new(100));
+                audio.send((vec![1, 2], budget.clone().acquire_many_owned(2).await.unwrap())).await.unwrap();
+                let (stop, stop_rx) = mpsc::channel(1);
+                let (events, rx) = std::sync::mpsc::channel();
+                let generation = Arc::new(Mutex::new(0));
+                let task = tokio::spawn(run_reconnecting(config(Some(service)), audio_rx, stop_rx,
+                    events, generation.clone(), request, Duration::from_millis(250)));
+                let mut old = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0).await.unwrap();
+                assert_eq!(serde_json::from_str::<serde_json::Value>(old.next().await.unwrap().unwrap().to_text().unwrap()).unwrap()["type"], "session.update");
+                // No acknowledgement: pre-restart audio must never leave the queue.
+                let mut new = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0).await.unwrap();
+                assert_eq!(serde_json::from_str::<serde_json::Value>(new.next().await.unwrap().unwrap().to_text().unwrap()).unwrap()["type"], "session.update");
+                assert_eq!(*generation.lock().unwrap(), 1);
+                assert_eq!(budget.available_permits(), 100);
+                assert!(matches!(rx.try_recv().unwrap(), QwenEvent::Restarted { generation: 1 }));
+                // Try a late result on the canceled socket. It must never reach consumers.
+                let _ = old.send(Message::Text(json!({"type":"response.text.done","item_id":"same","text":"OLD"}).to_string().into())).await;
+                match old.next().await {
+                    Some(Ok(Message::Text(frame))) => panic!("unexpected old-session frame: {frame}"),
+                    _ => {},
+                }
+                new.send(Message::Text(json!({"type":"session.updated"}).to_string().into())).await.unwrap();
+                audio.send((vec![7, 8], budget.clone().acquire_many_owned(2).await.unwrap())).await.unwrap();
+                let frame = new.next().await.unwrap().unwrap();
+                let frame: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                assert_eq!(frame["type"], "input_audio_buffer.append");
+                assert_eq!(B64.decode(frame["audio"].as_str().unwrap()).unwrap(), [7, 8]);
+                new.send(Message::Text(json!({"type":"response.text.done","response_id":"same","item_id":"same","text":"NEW"}).to_string().into())).await.unwrap();
+                let mut saw_new = false;
+                while !saw_new {
+                    for event in rx.try_iter() {
+                        let json = serde_json::to_string(&event).unwrap();
+                        assert!(!json.contains("OLD"));
+                        saw_new |= json.contains("NEW");
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                stop.send(()).await.unwrap();
+                timeout(Duration::from_millis(100), task).await.unwrap().unwrap().unwrap();
+                // EOF/reset is immediate. In particular, there is no session.finish.
+                assert!(!matches!(new.next().await, Some(Ok(Message::Text(_)))));
+                assert_eq!(budget.available_permits(), 100);
+            }).await.unwrap();
+        }
+    }
+
+    #[cfg(not(feature = "tauri-host"))]
+    #[tokio::test]
+    async fn stop_cancels_stalled_websocket_handshake() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let request = format!("ws://{}", listener.local_addr().unwrap())
+            .into_client_request()
+            .unwrap();
+        let (_audio, audio_rx) = mpsc::channel(1);
+        let (stop, stop_rx) = mpsc::channel(1);
+        let (events, _rx) = std::sync::mpsc::channel();
+        let task = tokio::spawn(run_reconnecting(
+            config(None),
+            audio_rx,
+            stop_rx,
+            events,
+            Arc::new(Mutex::new(0)),
+            request,
+            Duration::from_secs(300),
+        ));
+        let _stalled_peer = listener.accept().await.unwrap();
+        stop.send(()).await.unwrap();
+        timeout(Duration::from_millis(100), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[cfg(not(feature = "tauri-host"))]
+    #[tokio::test]
+    async fn restart_cancels_a_blocked_socket_write() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        timeout(Duration::from_secs(6), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let request = format!("ws://{}", listener.local_addr().unwrap())
+                .into_client_request()
+                .unwrap();
+            let (audio, audio_rx) = mpsc::channel(1);
+            let budget = Arc::new(tokio::sync::Semaphore::new(1));
+            let (stop, stop_rx) = mpsc::channel(1);
+            let (events, _rx) = std::sync::mpsc::channel();
+            let task = tokio::spawn(run_reconnecting(
+                config(None),
+                audio_rx,
+                stop_rx,
+                events,
+                Arc::new(Mutex::new(0)),
+                request,
+                Duration::from_secs(2),
+            ));
+            let mut old = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            old.next().await.unwrap().unwrap();
+            old.send(Message::Text(
+                json!({"type":"session.updated"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+            // Deliberately exceed production's 96 KB cap only in this fixture to
+            // fill the kernel send buffer deterministically while the peer stops reading.
+            audio
+                .send((
+                    vec![0; 8 * 1024 * 1024],
+                    budget.clone().acquire_owned().await.unwrap(),
+                ))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            assert_eq!(
+                audio.capacity(),
+                1,
+                "packet must be in the send future, not queued"
+            );
+            assert_eq!(budget.available_permits(), 0, "write must still be pending");
+            let mut new = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            new.next().await.unwrap().unwrap();
+            assert_eq!(
+                budget.available_permits(),
+                1,
+                "rotation releases pending write and its permit"
+            );
+            stop.send(()).await.unwrap();
+            timeout(Duration::from_millis(100), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

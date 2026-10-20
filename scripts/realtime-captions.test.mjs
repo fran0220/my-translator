@@ -4,10 +4,12 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 
 let stopEvents = () => {};
+const audioInvocations = [];
 globalThis.window = {
     __TAURI__: { core: {
         Channel: class {},
-        invoke: async command => {
+        invoke: async (command, args) => {
+            if (command === 'qwen_realtime_send_audio') audioInvocations.push(args);
             if (command.endsWith('_stop')) stopEvents();
             return 1;
         },
@@ -49,6 +51,29 @@ test('Qwen displays deltas immediately, corrects finals and pairs by item ID, no
     client.channel.onmessage({ type: 'closed' });
     assert.deepEqual(segments, [['two', '第二'], ['one', '第一']]);
     assert.equal(source + target, '');
+});
+
+test('Qwen restart preserves displayed text, fences captured generations and cancels late callbacks', async () => {
+    const client = new QwenRealtimeClient();
+    const segments = [];
+    client.onSegment = (...pair) => segments.push(pair);
+    await client.connect({ apiKey: 'placeholder', targetLanguage: 'zh' });
+    const oldChannel = client.channel;
+    oldChannel.onmessage({ type: 'realtime', event: { type: 'response.text.delta', item_id: 'same', delta: '旧字幕' } });
+    oldChannel.onmessage({ type: 'restarted', generation: 1 });
+    assert.deepEqual(segments, [['', '旧字幕']]);
+    audioInvocations.length = 0;
+    await client.sendAudio(new Uint8Array([1, 2]).buffer, 0);
+    await client.sendAudio(new Uint8Array([7, 8]).buffer, 1);
+    assert.deepEqual(audioInvocations.map(call => [call.pcm, call.generation]), [[[7, 8], 1]]);
+    oldChannel.onmessage({ type: 'realtime', event: { type: 'response.text.delta', item_id: 'same', delta: '新字幕' } });
+    stopEvents = () => oldChannel.onmessage({ type: 'realtime', event: { type: 'response.text.done', item_id: 'same', text: '迟到结果' } });
+    await client.disconnect();
+    assert.deepEqual(segments, [['', '旧字幕'], ['', '新字幕']]);
+    await client.connect({ apiKey: 'placeholder', targetLanguage: 'zh' });
+    oldChannel.onmessage({ type: 'transcript', text: '旧通道', is_final: true });
+    assert.equal(segments.length, 2);
+    stopEvents = () => {};
 });
 
 test('legacy Qwen snapshots replace rather than append', async () => {

@@ -21,11 +21,17 @@ export class QwenRealtimeClient {
         this._targets = new Map();
         this._completed = new Set();
         this._closed = false;
+        this._generation = 0;
     }
 
     async connect(cfg) {
+        this._closed = false;
+        this._generation = 0;
         this.channel = new Channel();
-        this.channel.onmessage = (evt) => this._handleEvent(evt);
+        const channel = this.channel;
+        this.channel.onmessage = (evt) => {
+            if (this.channel === channel) this._handleEvent(evt);
+        };
 
         try {
             this.sessionId = await invoke('qwen_realtime_start', {
@@ -44,13 +50,15 @@ export class QwenRealtimeClient {
         }
     }
 
-    async sendAudio(arrayBuffer) {
+    async sendAudio(arrayBuffer, generation = this._generation) {
         if (!this.isConnected || this.sessionId == null) return;
+        if (generation !== this._generation) return;
         const bytes = Array.from(new Uint8Array(arrayBuffer));
         try {
             await invoke('qwen_realtime_send_audio', {
                 sessionId: this.sessionId,
                 pcm: bytes,
+                generation,
             });
         } catch (err) {
             console.warn('[Qwen Realtime] send audio failed:', err);
@@ -77,22 +85,23 @@ export class QwenRealtimeClient {
 
     async disconnect() {
         if (!this.isConnected) return;
-        this.isConnected = false;
-        const closed = new Promise(resolve => { this._resolveClosed = resolve; });
-        const timer = setTimeout(() => this._handleEvent({ type: 'closed', reason: 'drain_timeout' }), 16000);
+        const sessionId = this.sessionId;
+        // Fence late channel events before invoking IPC; preserve only displayed text.
+        this._handleEvent({ type: 'closed', reason: 'stopped' });
         try {
-            await invoke('qwen_realtime_stop', { sessionId: this.sessionId });
-            await closed;
+            await invoke('qwen_realtime_stop', { sessionId });
         } catch {}
-        finally {
-            clearTimeout(timer);
-            this._handleEvent({ type: 'closed', reason: 'stopped' });
-        }
     }
 
     _handleEvent(evt) {
         if (this._closed) return;
         switch (evt.type) {
+            case 'restarted':
+                this._generation = evt.generation;
+                this.flushPending();
+                this._completed.clear();
+                this.onStatusChange('connecting', '五分钟重开，等待新连接');
+                break;
             case 'realtime':
                 this._handleRealtime(evt.event);
                 break;
@@ -117,7 +126,6 @@ export class QwenRealtimeClient {
                 this._closed = true;
                 this.isConnected = false;
                 this.flushPending();
-                this._resolveClosed?.();
                 this.onClosed(evt.reason);
                 break;
         }

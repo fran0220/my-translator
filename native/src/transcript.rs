@@ -71,6 +71,7 @@ impl Transcript {
 
     pub fn qwen(&mut self, event: QwenEvent) {
         match event {
+            QwenEvent::Restarted { .. } => self.finish(),
             QwenEvent::Transcript {
                 text,
                 is_final: true,
@@ -302,9 +303,14 @@ mod tests {
             });
         }
         assert_eq!(t.target, "先后");
-        t.finish();
+        t.qwen(QwenEvent::Restarted { generation: 1 });
         assert_eq!(t.segments[2].target, "先");
         assert_eq!(t.segments[3].target, "后");
+        t.qwen(QwenEvent::Realtime {
+            event: json!({"type":"response.text.delta","item_id":"t1","delta":"新会话"}),
+        });
+        assert_eq!(t.target, "新会话");
+        assert_eq!(t.segments.len(), 4);
     }
     #[test]
     fn soniox_provisional_revisions_do_not_duplicate_final_tokens() {
