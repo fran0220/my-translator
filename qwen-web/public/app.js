@@ -86,6 +86,7 @@ function stop(message = '已停止 · 设备已释放；字幕保留') {
   capture?.getTracks().forEach(t => t.stop()); capture = null;
   cancelAnimationFrame(animation); audio?.close().catch(() => {}); audio = null; analyser = null; monitor = null;
   $('wave').getContext('2d').clearRect(0, 0, 720, 64); $('level').textContent = '静音 · −∞ dB';
+  $('diagnostics').textContent = 'SDP — · ICE closed · DataChannel closed · 模型已断开';
   busy(false); $('source').onchange(); status(message);
 }
 $('stop').onclick = () => stop();
@@ -102,6 +103,7 @@ async function start(localOnly) {
     for (const track of stream.getTracks()) track.onended = () => { if (ticket === generation) stop('音频来源已结束 · 设备已释放'); };
     meter(new MediaStream(stream.getAudioTracks()));
     await enumerate();
+    if (ticket !== generation) return;
     if (localOnly) status('本地试音 · 不连接 Qwen，不调用 API');
     else await connect(ticket);
   } catch (e) { fail(e.name === 'NotAllowedError' ? new Error('音频权限被拒绝或分享已取消。请允许麦克风/重新分享后再试。') : e, ticket); }
