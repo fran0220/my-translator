@@ -29,6 +29,7 @@ async function api(path, body, type = 'application/json', signal) {
 function signedIn(value) {
   csrf = value || '';
   $('workspace').hidden = !csrf; $('logout').hidden = !csrf; $('login').hidden = !!csrf;
+  if (csrf) initializeDevices();
 }
 $('loginForm').onsubmit = async event => {
   event.preventDefault(); error('');
@@ -45,14 +46,24 @@ async function enumerate() {
   for (const device of devices.filter(d => d.kind === 'audioinput')) $('device').add(new Option(device.label || `麦克风 ${$('device').length}`, device.deviceId));
   if ([...$('device').options].some(o => o.value === selected)) $('device').value = selected;
 }
-$('devices').onclick = async () => {
-  error(''); const ticket = generation;
+async function initializeDevices() {
+  error(''); const ticket = ++generation;
+  busy(true); status('初始化音频 · 请允许麦克风权限，正在识别设备…');
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     stream.getTracks().forEach(t => t.stop());
-    if (ticket === generation) await enumerate();
-  } catch (e) { error(`无法访问麦克风：${e.name}`); }
-};
+    if (ticket !== generation) return;
+    await enumerate();
+    if (ticket === generation) status('音频设备已识别 · 麦克风已释放，可选择设备后开始');
+  } catch (e) {
+    if (ticket !== generation) return;
+    status('麦克风尚未授权 · 可重试授权或选择共享音频');
+    error(`无法访问麦克风：${e.name}。请在浏览器站点权限中允许麦克风，再点击「刷新设备 / 授权」。`);
+  } finally {
+    if (ticket === generation) { busy(false); $('source').onchange(); }
+  }
+}
+$('devices').onclick = initializeDevices;
 navigator.mediaDevices?.addEventListener('devicechange', () => enumerate().catch(() => {}));
 $('source').onchange = () => $('device').disabled = $('source').value !== 'mic';
 
