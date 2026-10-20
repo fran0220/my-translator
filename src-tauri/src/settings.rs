@@ -45,6 +45,9 @@ pub struct Settings {
     pub endpoint_delay: u32,
     /// Audio source: "system" | "microphone" | "both"
     pub audio_source: String,
+    /// Native Windows endpoint IDs. Empty resolves the default once at start.
+    pub input_device_id: String,
+    pub output_device_id: String,
     /// Overlay opacity: 0.0 - 1.0
     pub overlay_opacity: f64,
     /// Font size in px
@@ -137,6 +140,8 @@ impl Default for Settings {
             language_hints_strict: false,
             endpoint_delay: 3000,
             audio_source: "system".to_string(),
+            input_device_id: String::new(),
+            output_device_id: String::new(),
             overlay_opacity: 0.85,
             font_size: 16,
             max_lines: 5,
@@ -402,10 +407,15 @@ mod tests {
             let override_dir = Temp::new();
             let (store, mut settings) = override_dir.open().unwrap();
             settings.font_size = 27;
+            settings.input_device_id = "capture-stable-id".into();
+            settings.output_device_id = "render-stable-id".into();
             store.save(&settings).unwrap();
             settings.font_size = 31;
             store.save(&settings).unwrap(); // Replaces existing file on Windows too.
             assert_eq!(override_dir.open().unwrap().1.font_size, 31);
+            let restored = override_dir.open().unwrap().1;
+            assert_eq!(restored.input_device_id, "capture-stable-id");
+            assert_eq!(restored.output_device_id, "render-stable-id");
             assert_eq!(fs::read_dir(&override_dir.0).unwrap().count(), 1);
         }
 

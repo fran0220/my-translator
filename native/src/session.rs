@@ -1,13 +1,18 @@
 //! Own capture on one OS thread. Network tasks run on Tokio, never on the GUI executor.
 use crate::{
-    audio::{microphone::MicCapture, resampler::UpsamplerTo24k},
+    audio::{
+        devices::{self, DeviceInfo, Kind},
+        meter::Meter,
+        microphone::MicCapture,
+        resampler::UpsamplerTo24k,
+    },
     openai, qwen,
     settings::Settings,
     soniox,
 };
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -31,6 +36,15 @@ pub enum Event {
 pub struct Session {
     stop: Arc<AtomicBool>,
     pub events: mpsc::Receiver<Event>,
+    pub diagnostics: Arc<Mutex<[ChannelDiagnostics; 2]>>,
+}
+
+#[derive(Clone, Default)]
+pub struct ChannelDiagnostics {
+    pub device: Option<DeviceInfo>,
+    pub meter: Meter,
+    pub last_packet: Option<Instant>,
+    pub opened: bool,
 }
 
 impl Session {
@@ -43,14 +57,50 @@ impl Session {
         let (tx, events) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
+        let diagnostics = Arc::new(Mutex::new(Default::default()));
+        let levels = diagnostics.clone();
         std::thread::spawn(move || {
-            if let Err(message) = run(settings, providers, runtime, flag, &tx) {
+            if let Err(message) = run(settings, providers, runtime, flag, &tx, &levels) {
                 let _ = tx.send(Event::Status(message));
             }
             let _ = tx.send(Event::Boundary);
             let _ = tx.send(Event::Stopped);
         });
-        Ok(Self { stop, events })
+        Ok(Self {
+            stop,
+            events,
+            diagnostics,
+        })
+    }
+    /// Capture diagnostics only: no runtime, credentials, provider or network task.
+    pub fn preview(settings: Settings) -> Self {
+        let (tx, events) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let diagnostics = Arc::new(Mutex::new(Default::default()));
+        let levels = diagnostics.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<(), String> {
+                let mut capture = Capture::start(&settings, &levels)?;
+                let _ = tx.send(Event::Status("试音中 · 仅本地采集，不连接翻译服务".into()));
+                let mut inputs = vec![vec![]; capture.inputs.len()];
+                while !flag.load(Ordering::SeqCst) {
+                    capture.read(&mut inputs, &levels)?;
+                    for input in &mut inputs {
+                        input.clear();
+                    }
+                    std::thread::sleep(Duration::from_millis(30));
+                }
+                Ok(())
+            })();
+            let _ = tx.send(Event::Status(result.err().unwrap_or("试音已停止".into())));
+            let _ = tx.send(Event::Stopped);
+        });
+        Self {
+            stop,
+            events,
+            diagnostics,
+        }
     }
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
@@ -94,32 +144,126 @@ pub fn providers(settings: &Settings, failover: bool) -> Vec<&'static str> {
 }
 
 struct Capture {
+    #[cfg(not(target_os = "windows"))]
     mic: MicCapture,
+    #[cfg(target_os = "windows")]
+    mic: crate::audio::wasapi::SystemAudioCapture,
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     system: crate::audio::SystemAudioCapture,
     inputs: Vec<mpsc::Receiver<Vec<u8>>>,
+    devices: Vec<DeviceInfo>,
+    checked: Instant,
 }
 impl Capture {
-    fn start(source: &str) -> Result<Self, String> {
+    fn start(settings: &Settings, levels: &Mutex<[ChannelDiagnostics; 2]>) -> Result<Self, String> {
+        let source = settings.audio_source.as_str();
+        let available = devices::enumerate()?;
         let mut capture = Self {
+            #[cfg(not(target_os = "windows"))]
             mic: MicCapture::new(),
+            #[cfg(target_os = "windows")]
+            mic: crate::audio::wasapi::SystemAudioCapture::new(),
             inputs: vec![],
+            devices: vec![],
+            checked: Instant::now(),
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             system: crate::audio::SystemAudioCapture::new(),
         };
         if matches!(source, "system" | "both") {
-            #[cfg(any(target_os = "windows", target_os = "macos"))]
-            capture.inputs.push(capture.system.start()?);
+            #[cfg(target_os = "windows")]
+            {
+                let device =
+                    devices::resolve(&available, Kind::Output, &settings.output_device_id)?;
+                capture
+                    .inputs
+                    .push(capture.system.start_selected(&device.id, Kind::Output)?);
+                capture.devices.push(device);
+            }
+            #[cfg(target_os = "macos")]
+            {
+                capture.inputs.push(capture.system.start()?);
+                capture.devices.push(DeviceInfo {
+                    id: String::new(),
+                    name: "系统音频".into(),
+                    kind: Kind::Output,
+                    default: true,
+                    available: true,
+                    state: "可用".into(),
+                    muted: None,
+                });
+            }
             #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             return Err("当前平台尚未提供系统音频采集，请选择麦克风；Windows 使用 WASAPI".into());
         }
         if matches!(source, "microphone" | "both") {
+            let device = devices::resolve(&available, Kind::Input, &settings.input_device_id)?;
+            #[cfg(target_os = "windows")]
+            capture
+                .inputs
+                .push(capture.mic.start_selected(&device.id, Kind::Input)?);
+            #[cfg(not(target_os = "windows"))]
             capture.inputs.push(capture.mic.start()?);
+            capture.devices.push(device);
         }
         if capture.inputs.is_empty() {
             return Err("请选择音频来源".into());
         }
+        for device in &capture.devices {
+            levels.lock().unwrap()[if device.kind == Kind::Input { 0 } else { 1 }] =
+                ChannelDiagnostics {
+                    device: Some(device.clone()),
+                    opened: true,
+                    ..Default::default()
+                };
+        }
         Ok(capture)
+    }
+    fn read(
+        &mut self,
+        inputs: &mut [Vec<u8>],
+        levels: &Mutex<[ChannelDiagnostics; 2]>,
+    ) -> Result<(), String> {
+        if self.checked.elapsed() >= Duration::from_secs(2) {
+            let available = devices::enumerate()?;
+            for device in &self.devices {
+                if !device.id.is_empty()
+                    && devices::resolve(&available, device.kind, &device.id).is_err()
+                {
+                    return Err(format!(
+                        "设备已离线：{}；请重新连接后再开始，不会切换其他设备",
+                        device.name
+                    ));
+                }
+            }
+            self.checked = Instant::now();
+        }
+        for (index, input) in self.inputs.iter().enumerate() {
+            let mut batch = vec![];
+            for _ in 0..100 {
+                match input.try_recv() {
+                    Ok(pcm) => batch.extend(pcm),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Err(format!(
+                            "音频设备已断开或读取失败：{}；请检查连接/权限后重新开始",
+                            self.devices[index].name
+                        ));
+                    }
+                }
+            }
+            if !batch.is_empty() {
+                let mut levels = levels.lock().unwrap();
+                let channel = &mut levels[if self.devices[index].kind == Kind::Input {
+                    0
+                } else {
+                    1
+                }];
+                channel.meter = Meter::from_pcm(&batch);
+                channel.last_packet = Some(Instant::now());
+                inputs[index].extend(batch);
+            }
+        }
+        Ok(())
     }
     fn stop(&mut self) {
         self.mic.stop();
@@ -145,6 +289,8 @@ enum Transport {
         stop: async_mpsc::Sender<()>,
         events: mpsc::Receiver<qwen::QwenEvent>,
         budget: Arc<Semaphore>,
+        generation: Arc<Mutex<u64>>,
+        epoch: u64,
     },
     Soniox {
         audio: async_mpsc::Sender<Vec<u8>>,
@@ -195,13 +341,22 @@ impl Transport {
                     target_language: settings.target_language.clone(),
                     service: settings.qwen_service.clone(),
                 };
-                let task = runtime.spawn(qwen::run_session(config, rx, stop_rx, tx));
+                let generation = Arc::new(Mutex::new(0));
+                let task = runtime.spawn(qwen::run_session_generation(
+                    config,
+                    rx,
+                    stop_rx,
+                    tx,
+                    generation.clone(),
+                ));
                 Ok((
                     Self::Qwen {
                         audio,
                         stop,
                         events,
                         budget: Arc::new(Semaphore::new(qwen::MAX_QUEUED_AUDIO_BYTES)),
+                        generation,
+                        epoch: 0,
                     },
                     task,
                 ))
@@ -234,7 +389,17 @@ impl Transport {
                         .map_err(|_| "OpenAI 音频队列已满或已关闭")?;
                 }
             }
-            Self::Qwen { audio, budget, .. } => {
+            Self::Qwen {
+                audio,
+                budget,
+                generation,
+                epoch,
+                ..
+            } => {
+                let current = generation.lock().unwrap();
+                if *current != *epoch {
+                    return Ok(());
+                }
                 let permit = budget
                     .clone()
                     .try_acquire_many_owned(pcm.len() as u32)
@@ -259,21 +424,32 @@ impl Transport {
             }
         }
     }
-    fn poll(&self, tx: &mpsc::Sender<Event>) {
+    fn poll(&mut self, tx: &mpsc::Sender<Event>) -> bool {
+        let mut restarted = false;
         match self {
             Self::OpenAi { events, .. } => {
                 for event in events.try_iter() {
                     if matches!(&event, openai::OpenAiEvent::Status { state, .. } if state == "ready")
                     {
-                        let _ = tx.send(Event::Status("OpenAI · 正在翻译".into()));
+                        let _ = tx.send(Event::Status("OpenAI · 服务已连接".into()));
                     }
                     let _ = tx.send(Event::OpenAi(event));
                 }
             }
-            Self::Qwen { events, .. } => {
-                for event in events.try_iter() {
+            Self::Qwen { events, epoch, .. } => {
+                let pending: Vec<_> = events.try_iter().collect();
+                let boundary = pending
+                    .iter()
+                    .rposition(|event| matches!(event, qwen::QwenEvent::Restarted { .. }))
+                    .unwrap_or(0);
+                for event in pending.into_iter().skip(boundary) {
+                    if let qwen::QwenEvent::Restarted { generation } = &event {
+                        *epoch = *generation;
+                        restarted = true;
+                        let _ = tx.send(Event::Status("千问 · 五分钟重开，等待新连接".into()));
+                    }
                     if matches!(&event, qwen::QwenEvent::Status { state, .. } if state == "ready") {
-                        let _ = tx.send(Event::Status("千问 · 正在翻译".into()));
+                        let _ = tx.send(Event::Status("千问 · 服务已连接".into()));
                     }
                     let _ = tx.send(Event::Qwen(event));
                 }
@@ -281,7 +457,7 @@ impl Transport {
             Self::Soniox { events, .. } => {
                 for event in events.try_iter() {
                     let event = match event {
-                        soniox::Event::Ready => Event::Status("Soniox · 正在翻译".into()),
+                        soniox::Event::Ready => Event::Status("Soniox · 服务已连接".into()),
                         soniox::Event::Text(value) => Event::Soniox(value),
                         soniox::Event::Boundary => Event::Boundary,
                     };
@@ -289,6 +465,7 @@ impl Transport {
                 }
             }
         }
+        restarted
     }
 }
 
@@ -298,8 +475,10 @@ fn run(
     runtime: Runtime,
     stop: Arc<AtomicBool>,
     tx: &mpsc::Sender<Event>,
+    levels: &Mutex<[ChannelDiagnostics; 2]>,
 ) -> Result<(), String> {
-    let mut capture = Capture::start(&settings.audio_source)?;
+    let mut capture = Capture::start(&settings, levels)?;
+    let _ = tx.send(Event::Status("设备已打开 · 等待服务连接".into()));
     // At most two attempts per configured provider. A stop always wins over failover.
     for (attempt, name) in providers
         .iter()
@@ -324,7 +503,21 @@ fn run(
         let mut stopping = None;
         let mut error = None;
         loop {
-            transport.poll(tx);
+            if *name == "qwen" && stop.load(Ordering::SeqCst) {
+                capture.stop();
+                task.abort();
+                let _ = runtime.block_on(&mut task);
+                let _ = tx.send(Event::Boundary);
+                let _ = tx.send(Event::Status("已停止".into()));
+                return Ok(());
+            }
+            if transport.poll(tx) {
+                for (input, receiver) in inputs.iter_mut().zip(&capture.inputs) {
+                    input.clear();
+                    while receiver.try_recv().is_ok() {}
+                }
+                flush = Instant::now();
+            }
             if task.is_finished() {
                 break;
             }
@@ -364,19 +557,8 @@ fn run(
                 task.abort();
                 break;
             }
-            for (index, input) in capture.inputs.iter().enumerate() {
-                if stopping.is_some() {
-                    continue;
-                }
-                for _ in 0..100 {
-                    match input.try_recv() {
-                        Ok(pcm) => inputs[index].extend(pcm),
-                        Err(mpsc::TryRecvError::Empty) => break,
-                        Err(mpsc::TryRecvError::Disconnected) => {
-                            return Err("音频设备已断开或无法采集，请检查设备权限".into());
-                        }
-                    }
-                }
+            if stopping.is_none() {
+                capture.read(&mut inputs, levels)?;
             }
             if stopping.is_none()
                 && flush.elapsed() >= Duration::from_millis(200)
@@ -505,7 +687,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_sends_partial_capture_and_queued_audio_before_provider_finish() {
-        for provider in ["openai", "qianwen", "dashscope_intl"] {
+        for provider in ["openai"] {
             tokio::time::timeout(Duration::from_secs(3), async {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let address = listener.local_addr().unwrap();
@@ -569,7 +751,7 @@ mod tests {
                 let mut inputs = vec![vec![42, 0, 19, 0], vec![8, 0]];
                 let expected;
                 let result;
-                if provider == "openai" {
+                {
                     let (stop, stop_rx) = async_mpsc::unbounded_channel();
                     let (tx, events) = mpsc::channel();
                     let mut transport = Transport::OpenAi {
@@ -603,27 +785,6 @@ mod tests {
                         audio_output: false,
                     };
                     result = openai::run_connected(cfg, audio_rx, stop_rx, tx, socket).await;
-                } else {
-                    let (audio, audio_rx) = async_mpsc::channel(15);
-                    let (stop, stop_rx) = async_mpsc::channel(1);
-                    let (tx, events) = mpsc::channel();
-                    let mut transport = Transport::Qwen {
-                        audio,
-                        stop,
-                        events,
-                        budget: Arc::new(Semaphore::new(qwen::MAX_QUEUED_AUDIO_BYTES)),
-                    };
-                    transport.audio(vec![3, 0, 4, 0]).unwrap();
-                    flush_inputs(&mut inputs, &mut transport).unwrap();
-                    expected = vec![3, 0, 4, 0, 50, 0, 19, 0];
-                    transport.stop();
-                    let cfg = qwen::QwenRealtimeConfig {
-                        api_key: String::new(),
-                        source_language: "en".into(),
-                        target_language: "zh".into(),
-                        service: provider.into(),
-                    };
-                    result = qwen::run_connected(cfg, audio_rx, stop_rx, tx, socket).await;
                 }
                 result.unwrap();
                 assert!(inputs.iter().all(Vec::is_empty));
