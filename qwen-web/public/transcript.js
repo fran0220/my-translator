@@ -15,5 +15,6 @@ export class Transcript {
     if (this.items.size > 300) this.items.delete(this.items.keys().next().value);
     return true;
   }
-  text(source) { return [...this.items.values()].filter(x => x.source === source).map(x => x.text).join('\n'); }
+  parts(source) { return [...this.items.values()].filter(x => x.source === source).map(x => x.text); }
+  text(source) { return this.parts(source).join('\n'); }
 }
