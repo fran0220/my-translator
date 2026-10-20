@@ -31,6 +31,8 @@ test('authentication, CSRF, fixed upstream, body limits and SDP quotas', async t
   assert.equal(calls, 6);
   assert.equal((await request('logout', '{}', headers)).status, 200);
   assert.equal((await request('sdp', 'v=0', headers)).status, 401);
+  for (let i = 0; i < 8; i++) assert.equal((await request('login', '{"password":"wrong"}')).status, 401);
+  assert.equal((await request('login', '{"password":"0000"}')).status, 429);
 });
 test('incremental source/translation preserve separate items, deduplicate and finalize', () => {
   const t = new Transcript();

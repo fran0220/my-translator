@@ -1,7 +1,95 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Qwen · 实时翻译台</title><link rel="stylesheet" href="./style.css"></head>
-<body><main><header><div><small>QWEN / WEBRTC</small><h1>实时翻译台</h1><p>让语言流动，让声音被理解。</p></div><button id="logout" hidden>退出登录</button></header>
-<section id="login"><h2>内部测试登录</h2><p>仅限授权测试使用。音频直接通过 WebRTC 发送至 Qwen。</p><form id="loginForm"><label>访问密码<input id="password" type="password" autocomplete="current-password" required></label><button>进入翻译台 →</button></form></section>
-<div id="workspace" hidden><section class="controls"><div class="section-title"><h2>音频与连接</h2><span class="badge">Qwen 3.8 · 仅文本</span></div><div class="grid"><label>翻译方向<select id="language"><option value="zh">英文 → 中文</option><option value="en">中文 → 英文</option></select></label><label>音频来源<select id="source"><option value="mic">麦克风</option><option value="display">共享标签页 / 系统音频</option></select></label><label>麦克风设备<select id="device"><option value="">默认麦克风</option></select></label><button id="devices">刷新设备 / 授权</button></div><p class="hint">共享音频时，必须在浏览器对话框选择来源并勾选「分享音频」。系统音频支持取决于浏览器和操作系统，无法静默采集。</p><div class="meter-row"><canvas id="wave" width="720" height="64" aria-label="实际采音波形"></canvas><output id="level">静音 · −∞ dB</output></div><div class="actions"><button id="start" class="primary">开始翻译</button><button id="test">本地试音</button><button id="stop" disabled>停止 / 释放设备</button><label class="check"><input id="monitor" type="checkbox">本地监听（建议戴耳机）</label></div><label class="check"><input id="reconnect" type="checkbox" checked>启用每 5 分钟硬重连</label><p class="hint">重连不等待句尾、不补发历史，保留已显示字幕；连接间隙可能丢失语音。此策略不保证消除上游延迟。停止也会立即断开。</p><div id="status" role="status">就绪 · 尚未采音</div><div id="diagnostics" class="hint">SDP — · ICE — · DataChannel — · 模型 —</div></section>
-<section><div class="section-title"><h2>实时字幕</h2><button id="clear">清空显示</button></div><div class="transcripts"><article><small>原文 / SOURCE</small><div id="original" class="transcript" aria-live="polite"></div></article><article><small>译文 / TRANSLATION</small><div id="translated" class="transcript" aria-live="polite"></div></article></div></section>
-<section><div class="section-title"><div><h2>导播输出</h2><p class="hint">纯黑底白字 · 仅译文 · 最新最多 3 视觉行</p></div><button id="director">打开独立导播窗口 ↗</button></div><div class="grid"><label>导播字号 <output id="fontValue">48 px</output><input id="font" type="range" min="20" max="120" value="48"></label><label>字幕宽度 <output id="widthValue">92%</output><input id="width" type="range" min="35" max="100" value="92"></label></div><p class="hint">缩放窗口、调整字号或宽度后自动保留最新 3 行。字幕仅保存在当前页面内存，刷新即清空。</p></section></div><p id="error" role="alert"></p><footer>内部测试版 · API 密钥仅保存在服务器 · 不提供合成语音</footer></main><script type="module" src="./app.js"></script></body></html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Qwen · 实时翻译台</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<section id="login">
+  <div class="login-card">
+    <small>QWEN / WEBRTC</small>
+    <h1>实时翻译台</h1>
+    <p>内部测试使用。音频通过 WebRTC 直接发送至 Qwen，API 密钥仅保存在服务器。</p>
+    <form id="loginForm">
+      <label>访问密码<input id="password" type="password" autocomplete="current-password" required autofocus></label>
+      <button>进入翻译台 →</button>
+    </form>
+  </div>
+</section>
+
+<div id="workspace" hidden>
+  <aside class="panel">
+    <header class="brand">
+      <div><small>QWEN / WEBRTC</small><h1>实时翻译台</h1></div>
+      <button id="logout" class="ghost" hidden>退出</button>
+    </header>
+
+    <div class="group">
+      <h2>翻译</h2>
+      <label>方向<select id="language"><option value="zh">英文 → 中文</option><option value="en">中文 → 英文</option></select></label>
+      <label>音频来源<select id="source"><option value="mic">麦克风</option><option value="display">共享标签页 / 系统音频</option></select></label>
+      <div class="device-row">
+        <label>麦克风设备<select id="device"><option value="">默认麦克风</option></select></label>
+        <button id="devices" class="icon" title="刷新设备 / 重新授权" aria-label="刷新设备 / 重新授权">↻</button>
+      </div>
+      <p class="hint" id="sourceHint" hidden>浏览器会弹出共享对话框，请选择标签页并勾选「分享音频」。</p>
+    </div>
+
+    <div class="group">
+      <div class="meter"><canvas id="wave" width="720" height="64" aria-label="实际采音波形"></canvas><output id="level">静音 · −∞ dB</output></div>
+      <div class="actions">
+        <button id="start" class="primary">● 开始翻译</button>
+        <button id="stop" class="danger" disabled>■ 停止</button>
+      </div>
+      <button id="test" class="ghost wide">本地试音（不连接模型）</button>
+      <label class="check"><input id="monitor" type="checkbox">本地监听（建议戴耳机）</label>
+      <label class="check" title="重连不等待句尾、不补发历史，连接间隙可能丢失语音"><input id="reconnect" type="checkbox" checked>每 5 分钟硬重连</label>
+    </div>
+
+    <details class="group">
+      <summary><h2>导播输出</h2><span class="hint">黑底白字 · 仅译文 · 3 行</span></summary>
+      <label><span class="row">字号 <output id="fontValue">48 px</output></span><input id="font" type="range" min="20" max="120" value="48"></label>
+      <label><span class="row">宽度 <output id="widthValue">92%</output></span><input id="width" type="range" min="35" max="100" value="92"></label>
+      <button id="director" class="ghost wide">打开独立导播窗口 ↗</button>
+    </details>
+
+    <footer>
+      <div id="diagnostics">SDP — · ICE — · DataChannel — · 模型 —</div>
+      <div>字幕仅保存在当前页面内存 · 刷新即清空</div>
+    </footer>
+  </aside>
+
+  <main class="stage">
+    <header class="stage-bar">
+      <div id="status" role="status" data-state="idle">就绪 · 尚未采音</div>
+      <div class="tools">
+        <div class="segmented" role="group" aria-label="显示模式">
+          <button data-view="both" aria-pressed="true">双语</button>
+          <button data-view="target" aria-pressed="false">仅译文</button>
+        </div>
+        <div class="segmented" role="group" aria-label="字幕字号">
+          <button id="smaller" aria-label="减小字号">A−</button>
+          <button id="larger" aria-label="增大字号">A+</button>
+        </div>
+        <button id="clear" class="ghost">清空</button>
+      </div>
+    </header>
+    <div class="transcripts" data-view="both">
+      <article class="pane source">
+        <small>原文 / SOURCE</small>
+        <div id="original" class="transcript" aria-live="polite"></div>
+      </article>
+      <article class="pane target">
+        <small>译文 / TRANSLATION</small>
+        <div id="translated" class="transcript" aria-live="polite"></div>
+      </article>
+      <button id="follow" class="follow" hidden>↓ 跳到最新</button>
+    </div>
+  </main>
+</div>
+<p id="error" role="alert" title="点击关闭"></p>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
