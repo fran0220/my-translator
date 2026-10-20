@@ -100,7 +100,8 @@ export class OpenAiRealtimeClient {
         if (!this.isConnected) return;
         this.isConnected = false;
         const closed = new Promise(resolve => { this._resolveClosed = resolve; });
-        const timer = setTimeout(() => this._handleEvent({ type: 'closed', reason: 'drain_timeout' }), 4000);
+        // Backend has a 10s overall drain budget; allow 1s for IPC delivery.
+        const timer = setTimeout(() => this._handleEvent({ type: 'closed', reason: 'drain_timeout' }), 11000);
         try {
             await invoke('openai_realtime_stop', { sessionId: this.sessionId });
             await closed;

@@ -2,7 +2,7 @@
 // PCM16 / 16 kHz / mono input, text-only output, server-managed turns.
 // Modern text/lifecycle events retain item IDs for bilingual frontend alignment.
 // Legacy translation snapshots retain the existing Transcript contract.
-// Audio is bounded and held until session.updated; restart/stop cancel without finalization.
+// Audio is discarded until session.updated; restart/stop cancel without finalization.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use futures_util::{SinkExt, StreamExt};
@@ -272,7 +272,6 @@ async fn run_reconnecting(
     request: Request<()>,
     interval: Duration,
 ) -> Result<(), String> {
-    let mut restarted = false;
     loop {
         // Cancellation surrounds connect, configuration, reads AND pending sends.
         // Dropping this future drops the old socket; no finish/close-input request.
@@ -281,11 +280,25 @@ async fn run_reconnecting(
             _ = stop_rx.recv() => return Ok(()),
             _ = tokio::time::sleep(interval) => {},
             result = async {
-                let (socket, _) = timeout(Duration::from_secs(15),
-                    connect_async_with_config(request.clone(), None, true)).await
-                    .map_err(|_| "千问连接超时".to_string())?
-                    .map_err(|_| "千问连接失败，请检查所选服务、API 密钥及网络".to_string())?;
-                if restarted { while audio_rx.try_recv().is_ok() {} }
+                let setup = async {
+                    let (mut socket, _) = timeout(Duration::from_secs(15),
+                        connect_async_with_config(request.clone(), None, true)).await
+                        .map_err(|_| "千问连接超时".to_string())?
+                        .map_err(|_| "千问连接失败，请检查所选服务、API 密钥及网络".to_string())?;
+                    timeout(IO_TIMEOUT, socket.send(Message::Text(build_session_update(&cfg).into())))
+                        .await.map_err(|_| "发送千问会话配置超时".to_string())?
+                        .map_err(|_| "发送千问会话配置失败".to_string())?;
+                    Ok::<_, String>(socket)
+                };
+                tokio::pin!(setup);
+                // Initial connection and every restart have the same policy:
+                // no audio backlog while handshake/configuration is pending.
+                let socket = loop {
+                    tokio::select! {
+                        result = &mut setup => break result?,
+                        Some(_) = audio_rx.recv() => {},
+                    }
+                };
                 connected(&cfg, &mut audio_rx, &event_ch, socket).await
             } => return result,
         }
@@ -296,7 +309,6 @@ async fn run_reconnecting(
             *current
         };
         let _ = event_ch.send(QwenEvent::Restarted { generation: next });
-        restarted = true;
     }
 }
 
@@ -309,15 +321,6 @@ async fn connected(
     >,
 ) -> Result<(), String> {
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
-
-    let session_update = build_session_update(cfg);
-    timeout(
-        IO_TIMEOUT,
-        ws_sink.send(Message::Text(session_update.into())),
-    )
-    .await
-    .map_err(|_| "发送千问会话配置超时".to_string())?
-    .map_err(|_| "发送千问会话配置失败".to_string())?;
 
     let modern = cfg.service == "qianwen";
     let mut ready = false;
@@ -345,6 +348,9 @@ async fn connected(
                         };
                         let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
                         if kind == "session.updated" && !ready {
+                            // Drop frames queued before this acknowledgement even
+                            // when the socket and audio receiver became ready together.
+                            while audio_rx.try_recv().is_ok() {}
                             ready = true;
                             let _ = event_ch.send(QwenEvent::Status {
                                 state: "ready".into(), message: None,
@@ -368,7 +374,8 @@ async fn connected(
                 }
             }
 
-            Some((pcm, _permit)) = audio_rx.recv(), if ready => {
+            Some((pcm, _permit)) = audio_rx.recv() => {
+                if !ready { continue; }
                 let evt = serde_json::json!({
                     "type": "input_audio_buffer.append",
                     "audio": B64.encode(&pcm),
@@ -545,7 +552,7 @@ mod tests {
                     events, generation.clone(), request, Duration::from_millis(250)));
                 let mut old = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0).await.unwrap();
                 assert_eq!(serde_json::from_str::<serde_json::Value>(old.next().await.unwrap().unwrap().to_text().unwrap()).unwrap()["type"], "session.update");
-                // No acknowledgement: pre-restart audio must never leave the queue.
+                // No acknowledgement: pre-restart audio must never reach the server.
                 let mut new = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0).await.unwrap();
                 assert_eq!(serde_json::from_str::<serde_json::Value>(new.next().await.unwrap().unwrap().to_text().unwrap()).unwrap()["type"], "session.update");
                 assert_eq!(*generation.lock().unwrap(), 1);
@@ -558,6 +565,9 @@ mod tests {
                     _ => {},
                 }
                 new.send(Message::Text(json!({"type":"session.updated"}).to_string().into())).await.unwrap();
+                while !rx.try_iter().any(|event| matches!(event, QwenEvent::Status { state, .. } if state == "ready")) {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
                 audio.send((vec![7, 8], budget.clone().acquire_many_owned(2).await.unwrap())).await.unwrap();
                 let frame = new.next().await.unwrap().unwrap();
                 let frame: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
@@ -578,6 +588,75 @@ mod tests {
                 // EOF/reset is immediate. In particular, there is no session.finish.
                 assert!(!matches!(new.next().await, Some(Ok(Message::Text(_)))));
                 assert_eq!(budget.available_permits(), 100);
+            }).await.unwrap();
+        }
+    }
+
+    #[cfg(not(feature = "tauri-host"))]
+    #[tokio::test]
+    async fn slow_handshake_and_ack_discard_audio_on_initial_connect_and_restart() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        for service in ["qianwen", "dashscope_intl"] {
+            // Includes two explicit 300-second clock advances below.
+            timeout(Duration::from_secs(630), async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let request = format!("ws://{}", listener.local_addr().unwrap()).into_client_request().unwrap();
+                let (audio, audio_rx) = mpsc::channel(32);
+                let budget = Arc::new(tokio::sync::Semaphore::new(MAX_QUEUED_AUDIO_BYTES));
+                let (stop, stop_rx) = mpsc::channel(1);
+                let (events, rx) = std::sync::mpsc::channel();
+                let generation = Arc::new(Mutex::new(0));
+                let task = tokio::spawn(run_reconnecting(config(Some(service)), audio_rx, stop_rx,
+                    events, generation.clone(), request, Duration::from_secs(300)));
+                for epoch in 0..2 {
+                    let stream = listener.accept().await.unwrap().0;
+                    assert_eq!(*generation.lock().unwrap(), epoch);
+                    if epoch == 1 {
+                        assert!(rx.try_iter().any(|event| matches!(event, QwenEvent::Restarted { generation: 1 })));
+                    }
+                    // Stall HTTP upgrade, then stall model acknowledgement. Each
+                    // phase receives >3s of real-time PCM, exceeding the 96KB cap
+                    // if either wait stops consuming and releasing the permits.
+                    let feed = || async {
+                        for _ in 0..20 {
+                            let permit = budget.clone().try_acquire_many_owned(6400)
+                                .expect("waiting for ready must not exhaust the audio budget");
+                            audio.try_send((vec![3; 6400], permit)).unwrap();
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+                        assert_eq!(budget.available_permits(), MAX_QUEUED_AUDIO_BYTES);
+                    };
+                    feed().await;
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let config = socket.next().await.unwrap().unwrap();
+                    assert_eq!(serde_json::from_str::<serde_json::Value>(config.to_text().unwrap()).unwrap()["type"], "session.update");
+                    feed().await;
+                    socket.send(Message::Text(json!({"type":"session.updated"}).to_string().into())).await.unwrap();
+                    while !rx.try_iter().any(|event| matches!(event, QwenEvent::Status { state, .. } if state == "ready")) {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    audio.try_send((vec![7; 6400], budget.clone().try_acquire_many_owned(6400).unwrap())).unwrap();
+                    let frame = socket.next().await.unwrap().unwrap();
+                    let frame: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                    assert_eq!(frame["type"], "input_audio_buffer.append");
+                    assert_eq!(B64.decode(frame["audio"].as_str().unwrap()).unwrap(), vec![7; 6400], "no pre-ready audio may be replayed");
+                    socket.send(Message::Text(json!({"type":"response.text.done","item_id":"fresh","text":"FRESH"}).to_string().into())).await.unwrap();
+                    while !rx.try_iter().any(|event| serde_json::to_string(&event).unwrap().contains("FRESH")) {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    // Advance only the restart clock, not the real network stalls.
+                    tokio::time::pause();
+                    tokio::time::advance(Duration::from_secs(300)).await;
+                    tokio::time::resume();
+                    assert!(!matches!(socket.next().await, Some(Ok(Message::Text(_)))));
+                }
+                // Cancel the third connection while waiting for session.updated.
+                let mut waiting = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0).await.unwrap();
+                waiting.next().await.unwrap().unwrap();
+                stop.send(()).await.unwrap();
+                timeout(Duration::from_millis(100), task).await.unwrap().unwrap().unwrap();
+                assert!(!matches!(waiting.next().await, Some(Ok(Message::Text(_)))));
+                assert_eq!(budget.available_permits(), MAX_QUEUED_AUDIO_BYTES);
             }).await.unwrap();
         }
     }
