@@ -1,4 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+mod audio_panel;
+use audio_panel::AudioPanel;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
     component::{
@@ -32,6 +34,10 @@ struct Translator {
     broadcast: Option<AnyWindowHandle>,
     status: String,
     settings_open: bool,
+    audio_open: bool,
+    audio_panel: Entity<AudioPanel>,
+    preview: bool,
+    subtitle_seen: bool,
     failover: bool,
     stopping: bool,
     replay: std::collections::VecDeque<serde_json::Value>,
@@ -86,6 +92,7 @@ impl Translator {
         })
         .detach();
         let offline = replay.is_some();
+        let audio_panel = cx.new(|cx| AudioPanel::new(&settings, window, cx));
         let status = if config_error.is_some() {
             "配置不可用 · 请修正后重启"
         } else {
@@ -104,6 +111,10 @@ impl Translator {
             broadcast: None,
             status,
             settings_open: false,
+            audio_open: false,
+            audio_panel,
+            preview: false,
+            subtitle_seen: false,
             failover: true,
             stopping: false,
             replay: replay.unwrap_or_default().into(),
@@ -142,6 +153,11 @@ impl Translator {
                 Event::Stopped => {
                     self.session = None;
                     self.stopping = false;
+                    self.preview = false;
+                    self.audio_panel.update(cx, |panel, cx| {
+                        panel.active = false;
+                        cx.notify();
+                    });
                 }
                 Event::OpenAi(translator_native::openai::OpenAiEvent::Error {
                     message, ..
@@ -149,19 +165,45 @@ impl Translator {
                 | Event::Qwen(translator_native::qwen::QwenEvent::Error { message, .. }) => {
                     self.status = message
                 }
-                event => self.state.update(cx, |state, cx| {
-                    match event {
-                        Event::OpenAi(event) => state.transcript.openai(event),
-                        Event::Qwen(event) => state.transcript.qwen(event),
-                        Event::Soniox(value) => state.transcript.soniox(value),
-                        Event::Boundary => state.transcript.finish(),
-                        _ => {}
+                event => {
+                    let before = {
+                        let transcript = &self.state.read(cx).transcript;
+                        (
+                            transcript.source.clone(),
+                            transcript.target.clone(),
+                            transcript.segments.len(),
+                        )
+                    };
+                    let boundary = matches!(
+                        &event,
+                        Event::Boundary
+                            | Event::Qwen(translator_native::qwen::QwenEvent::Restarted { .. })
+                    );
+                    self.state.update(cx, |state, cx| {
+                        match event {
+                            Event::OpenAi(event) => state.transcript.openai(event),
+                            Event::Qwen(event) => state.transcript.qwen(event),
+                            Event::Soniox(value) => state.transcript.soniox(value),
+                            Event::Boundary => state.transcript.finish(),
+                            _ => {}
+                        }
+                        cx.notify();
+                    });
+                    let transcript = &self.state.read(cx).transcript;
+                    if !boundary
+                        && before
+                            != (
+                                transcript.source.clone(),
+                                transcript.target.clone(),
+                                transcript.segments.len(),
+                            )
+                    {
+                        self.subtitle_seen = true;
                     }
-                    cx.notify();
-                }),
+                }
             }
         }
-        if !self.settings_open {
+        if !self.settings_open && !self.audio_open {
             self.scroll.scroll_to_bottom();
         }
         cx.notify();
@@ -174,6 +216,7 @@ impl Translator {
         if let Some(error) = &self.config_error {
             return Err(error.clone());
         }
+        self.audio_panel.read(cx).apply(&mut self.settings, cx);
         self.settings.soniox_api_key = self.keys[0].read(cx).value().to_string();
         self.settings.openai_api_key = self.keys[1].read(cx).value().to_string();
         self.settings.qwen_api_key = self.keys[2].read(cx).value().to_string();
@@ -201,7 +244,13 @@ impl Translator {
                 .and_then(|_| Session::start(self.settings.clone(), self.failover))
             {
                 Ok(session) => {
+                    self.audio_panel.update(cx, |panel, cx| {
+                        panel.active = true;
+                        panel.diagnostics = Some(session.diagnostics.clone());
+                        cx.notify();
+                    });
                     self.session = Some(session);
+                    self.subtitle_seen = false;
                     self.status = "正在启动采集…".into();
                 }
                 Err(message) => self.status = message,
@@ -314,27 +363,6 @@ impl Translator {
                 ),
             )
             .child(
-                div().h_flex().gap_2().child("音频来源").children(
-                    [
-                        ("system", "系统声音"),
-                        ("microphone", "麦克风"),
-                        ("both-audio", "系统 + 麦克风"),
-                    ]
-                    .into_iter()
-                    .map(|(id, label)| {
-                        let value = if id == "both-audio" { "both" } else { id };
-                        Button::new(id)
-                            .label(label)
-                            .selected(self.settings.audio_source == value)
-                            .disabled(disabled)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.settings.audio_source = value.into();
-                                cx.notify();
-                            }))
-                    }),
-                ),
-            )
-            .child(
                 div()
                     .h_flex()
                     .gap_2()
@@ -412,6 +440,20 @@ impl Render for Translator {
                     .justify_between()
                     .child(div().text_2xl().child("实时翻译"))
                     .child(
+                        Button::new("audio-devices")
+                            .label(if self.audio_open {
+                                "返回字幕"
+                            } else {
+                                "音频设备 / 试音"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.audio_open = !this.audio_open;
+                                this.settings_open = false;
+                                this.scroll.set_offset(point(px(0.), px(0.)));
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         Button::new("settings")
                             .label(if self.settings_open {
                                 "返回字幕"
@@ -420,6 +462,7 @@ impl Render for Translator {
                             })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.settings_open = !this.settings_open;
+                                this.audio_open = false;
                                 if this.settings_open {
                                     this.scroll.set_offset(point(px(0.), px(0.)));
                                 } else {
@@ -429,7 +472,9 @@ impl Render for Translator {
                             })),
                     ),
             )
-            .when(!self.settings_open, |view| view.child(self.options(cx)))
+            .when(!self.settings_open && !self.audio_open, |view| {
+                view.child(self.options(cx))
+            })
             .child(
                 div()
                     .h_flex()
@@ -438,14 +483,15 @@ impl Render for Translator {
                         Button::new("start")
                             .primary()
                             .label(if self.stopping {
-                                "正在收尾…"
-                            } else if self.session.is_some() {
+                                "正在停止…"
+                            } else if self.session.is_some() && !self.preview {
                                 "停止翻译"
                             } else {
                                 "开始翻译"
                             })
                             .disabled(
                                 self.stopping
+                                    || (self.preview && self.session.is_some())
                                     || (self.session.is_none()
                                         && (self.offline || self.config_error.is_some())),
                             )
@@ -457,12 +503,81 @@ impl Render for Translator {
                             .on_click(cx.listener(Self::open_broadcast)),
                     ),
             )
+            .when(self.audio_open, |view| {
+                view.child(
+                    div()
+                        .h_flex()
+                        .gap_3()
+                        .child(
+                            Button::new("preview")
+                                .label(if self.preview {
+                                    "停止试音"
+                                } else {
+                                    "开始本地试音"
+                                })
+                                .disabled(
+                                    self.offline
+                                        || self.config_error.is_some()
+                                        || self.stopping
+                                        || (self.session.is_some() && !self.preview),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(session) = &this.session {
+                                        session.stop();
+                                        this.stopping = true;
+                                    } else if let Err(error) = this.save(cx) {
+                                        this.status = error;
+                                    } else {
+                                        let session = Session::preview(this.settings.clone());
+                                        this.audio_panel.update(cx, |panel, cx| {
+                                            panel.active = true;
+                                            panel.diagnostics = Some(session.diagnostics.clone());
+                                            cx.notify();
+                                        });
+                                        this.session = Some(session);
+                                        this.preview = true;
+                                        this.subtitle_seen = false;
+                                        this.status = "正在打开试音设备 · 不连接服务商".into();
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("save-audio")
+                                .label("保存设备选择")
+                                .disabled(
+                                    self.offline
+                                        || self.config_error.is_some()
+                                        || self.session.is_some(),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.status = match this.save(cx) {
+                                        Ok(()) => "设备选择已保存".into(),
+                                        Err(error) => error,
+                                    };
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
             .child(
                 div()
                     .text_sm()
                     .text_color(rgb(0xa5b4fc))
                     .child(self.status.clone()),
             )
+            .when(self.session.is_some() && !self.preview, |view| {
+                view.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x9ca3af))
+                        .child(if self.subtitle_seen {
+                            "字幕：已返回"
+                        } else {
+                            "字幕：等待服务端返回（设备打开不等于已收到字幕）"
+                        }),
+                )
+            })
             .when_some(self.config_error.clone(), |view, error| {
                 view.child(
                     div()
@@ -477,7 +592,9 @@ impl Render for Translator {
                     .id("content")
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
-                    .child(if self.settings_open {
+                    .child(if self.audio_open {
+                        self.audio_panel.clone().into_any_element()
+                    } else if self.settings_open {
                         self.render_settings(cx).into_any_element()
                     } else {
                         div()
