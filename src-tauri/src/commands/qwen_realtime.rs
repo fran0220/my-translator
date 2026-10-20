@@ -614,68 +614,126 @@ mod tests {
     #[cfg(not(feature = "tauri-host"))]
     #[tokio::test]
     async fn restart_cancels_a_blocked_socket_write() {
+        use std::{future::Future, task::Poll};
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-        timeout(Duration::from_secs(6), async {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let request = format!("ws://{}", listener.local_addr().unwrap())
-                .into_client_request()
-                .unwrap();
-            let (audio, audio_rx) = mpsc::channel(1);
-            let budget = Arc::new(tokio::sync::Semaphore::new(1));
-            let (stop, stop_rx) = mpsc::channel(1);
-            let (events, _rx) = std::sync::mpsc::channel();
-            let task = tokio::spawn(run_reconnecting(
-                config(None),
-                audio_rx,
-                stop_rx,
-                events,
-                Arc::new(Mutex::new(0)),
-                request,
-                Duration::from_secs(2),
-            ));
-            let mut old = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0)
-                .await
-                .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let request = format!("ws://{}", listener.local_addr().unwrap())
+            .into_client_request()
+            .unwrap();
+        const FRAME_BYTES: u32 = 6400; // Normal 200 ms PCM16/16 kHz batch.
+        let (audio, audio_rx) = mpsc::channel(1);
+        let budget = Arc::new(tokio::sync::Semaphore::new(FRAME_BYTES as usize));
+        let (stop, stop_rx) = mpsc::channel(1);
+        let (events, rx) = std::sync::mpsc::channel();
+        let generation = Arc::new(Mutex::new(0));
+        let mut session = Box::pin(run_reconnecting(
+            config(None),
+            audio_rx,
+            stop_rx,
+            events,
+            generation.clone(),
+            request,
+            Duration::from_secs(300),
+        ));
+        let peer = async {
+            let stream = listener.accept().await.unwrap().0;
+            // Constrain the actual accepted socket, not an assumed inherited
+            // listener option. Windows may otherwise buffer the entire old 8 MiB fixture.
+            let socket = socket2::SockRef::from(&stream);
+            socket.set_recv_buffer_size(4096).unwrap();
+            assert!(socket.recv_buffer_size().unwrap() <= 64 * 1024);
+            let mut old = tokio_tungstenite::accept_async(stream).await.unwrap();
             old.next().await.unwrap().unwrap();
             old.send(Message::Text(
                 json!({"type":"session.updated"}).to_string().into(),
             ))
             .await
             .unwrap();
-            // Deliberately exceed production's 96 KB cap only in this fixture to
-            // fill the kernel send buffer deterministically while the peer stops reading.
+            old
+        };
+        let _old = tokio::select! {
+            result = &mut session => panic!("session ended during handshake: {result:?}"),
+            old = timeout(Duration::from_secs(5), peer) => old.unwrap(),
+        };
+        // Drive the real connection until its acknowledgement is processed.
+        timeout(
+            Duration::from_secs(5),
+            std::future::poll_fn(|cx| {
+                assert!(session.as_mut().poll(cx).is_pending());
+                if rx.try_iter().any(
+                    |event| matches!(event, QwenEvent::Status { state, .. } if state == "ready"),
+                ) {
+                    Poll::Ready(())
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Time cannot expire while establishing backpressure. Drive the real
+        // future directly: an empty channel AND a retained permit after Pending
+        // prove it is suspended inside send, not just waiting to be scheduled.
+        tokio::time::pause();
+        let mut blocked = false;
+        for _ in 0..4096 {
+            // Safety cap, not an assumed kernel buffer size.
+            let permit = budget.clone().try_acquire_many_owned(FRAME_BYTES).unwrap();
             audio
-                .send((
-                    vec![0; 8 * 1024 * 1024],
-                    budget.clone().acquire_owned().await.unwrap(),
-                ))
-                .await
+                .try_send((vec![0; FRAME_BYTES as usize], permit))
                 .unwrap();
-            tokio::time::sleep(Duration::from_millis(400)).await;
+            // Exclude cooperative scheduling yields as a source of Pending.
+            assert!(futures_util::poll!(tokio::task::unconstrained(session.as_mut())).is_pending());
             assert_eq!(
                 audio.capacity(),
                 1,
-                "packet must be in the send future, not queued"
+                "the session must have consumed the queued frame"
             );
-            assert_eq!(budget.available_permits(), 0, "write must still be pending");
+            if budget.available_permits() == 0 {
+                blocked = true;
+                break;
+            }
+        }
+        assert!(
+            blocked,
+            "peer must exert backpressure before testing cancellation"
+        );
+        assert_eq!(*generation.lock().unwrap(), 0);
+        tokio::time::advance(Duration::from_secs(300)).await;
+        assert!(futures_util::poll!(session.as_mut()).is_pending());
+        assert_eq!(
+            *generation.lock().unwrap(),
+            1,
+            "rotation must win over the send timeout"
+        );
+        assert_eq!(
+            budget.available_permits(),
+            FRAME_BYTES as usize,
+            "canceling the pending write must release its permit"
+        );
+        tokio::time::resume();
+        let replacement = async {
             let mut new = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0)
                 .await
                 .unwrap();
-            new.next().await.unwrap().unwrap();
+            let update = new.next().await.unwrap().unwrap();
             assert_eq!(
-                budget.available_permits(),
-                1,
-                "rotation releases pending write and its permit"
+                serde_json::from_str::<serde_json::Value>(update.to_text().unwrap()).unwrap()
+                    ["type"],
+                "session.update"
             );
-            stop.send(()).await.unwrap();
-            timeout(Duration::from_millis(100), task)
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-        })
-        .await
-        .unwrap();
+        };
+        tokio::select! {
+            result = &mut session => panic!("session ended instead of reconnecting: {result:?}"),
+            result = timeout(Duration::from_secs(5), replacement) => result.unwrap(),
+        }
+        stop.send(()).await.unwrap();
+        timeout(Duration::from_millis(100), session)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[test]

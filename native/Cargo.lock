@@ -7104,6 +7104,7 @@ dependencies = [
  "screencapturekit 1.5.4",
  "serde",
  "serde_json",
+ "socket2",
  "tokio",
  "tokio-tungstenite",
  "windows 0.58.0",
