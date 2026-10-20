@@ -166,7 +166,7 @@ async fn run_connection(
                 while let Some(pcm) = audio.recv().await {
                     tokio::time::timeout_at(deadline, socket.send(Message::Binary(pcm.into()))).await.map_err(|_| "Soniox 音频收尾超时")?.map_err(|_| "Soniox 音频收尾失败")?;
                 }
-                tokio::time::timeout_at(deadline, socket.send(Message::Binary(Vec::new().into()))).await.map_err(|_| "Soniox 收尾超时")?.map_err(|_| "Soniox 收尾失败")?;
+                tokio::time::timeout_at(deadline, socket.send(Message::Text("".into()))).await.map_err(|_| "Soniox 收尾超时")?.map_err(|_| "Soniox 收尾失败")?;
             }
             _ = tokio::time::sleep_until(deadline), if closing => return Err("Soniox 收尾超时，尾句可能不完整".into()),
             message = socket.next() => match message {
@@ -222,7 +222,7 @@ async fn finish_rotation(
 ) -> Result<(), String> {
     tokio::time::timeout(limit, async {
         socket
-            .send(Message::Binary(Vec::new().into()))
+            .send(Message::Text("".into()))
             .await
             .map_err(|_| "Soniox 轮换收尾发送失败")?;
         while let Some(message) = socket.next().await {
@@ -254,13 +254,19 @@ async fn finish_rotation(
 mod tests {
     use super::*;
 
-    async fn next_binary<S>(socket: &mut tokio_tungstenite::WebSocketStream<S>) -> Vec<u8>
+    async fn next_audio_or_end<S>(socket: &mut tokio_tungstenite::WebSocketStream<S>) -> Message
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
         loop {
-            if let Message::Binary(bytes) = socket.next().await.unwrap().unwrap() {
-                return bytes.to_vec();
+            match socket.next().await.unwrap().unwrap() {
+                Message::Text(text) if !text.is_empty() => {
+                    assert_eq!(
+                        serde_json::from_str::<Value>(&text).unwrap()["type"],
+                        "keepalive"
+                    );
+                }
+                frame => return frame,
             }
         }
     }
@@ -292,7 +298,10 @@ mod tests {
                     old.next().await.unwrap().unwrap(),
                     Message::Text(_)
                 ));
-                assert_eq!(next_binary(&mut old).await, [1, 2, 3, 4]);
+                assert_eq!(
+                    next_audio_or_end(&mut old).await,
+                    Message::Binary(vec![1, 2, 3, 4].into())
+                );
                 old.send(tokens("旧临时", false)).await.unwrap();
                 let mut new = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0)
                     .await
@@ -303,7 +312,7 @@ mod tests {
                 ));
                 // New data is available first: it must not enter old transcript state.
                 new.send(tokens("新完整", true)).await.unwrap();
-                assert!(next_binary(&mut old).await.is_empty());
+                assert_eq!(next_audio_or_end(&mut old).await, Message::Text("".into()));
                 audio_tx.send(vec![9, 8]).await.unwrap();
                 audio_tx.send(vec![7, 6, 5, 4]).await.unwrap();
                 stop_tx.send(()).await.unwrap();
@@ -312,9 +321,15 @@ mod tests {
                 old.send(Message::Text(json!({"finished":true}).to_string().into()))
                     .await
                     .unwrap();
-                assert_eq!(next_binary(&mut new).await, [9, 8]);
-                assert_eq!(next_binary(&mut new).await, [7, 6, 5, 4]);
-                assert!(next_binary(&mut new).await.is_empty());
+                assert_eq!(
+                    next_audio_or_end(&mut new).await,
+                    Message::Binary(vec![9, 8].into())
+                );
+                assert_eq!(
+                    next_audio_or_end(&mut new).await,
+                    Message::Binary(vec![7, 6, 5, 4].into())
+                );
+                assert_eq!(next_audio_or_end(&mut new).await, Message::Text("".into()));
                 new.send(Message::Text(json!({"finished":true}).to_string().into()))
                     .await
                     .unwrap();
@@ -379,7 +394,7 @@ mod tests {
                     .unwrap();
                 new.next().await.unwrap().unwrap();
                 new.send(tokens("不应显示", true)).await.unwrap();
-                assert!(next_binary(&mut old).await.is_empty());
+                assert_eq!(next_audio_or_end(&mut old).await, Message::Text("".into()));
                 if disconnect {
                     old.close(None).await.unwrap();
                 }
@@ -406,6 +421,46 @@ mod tests {
             );
             assert!(rx.try_iter().all(|e| matches!(e, Event::Ready)));
             server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn final_tokens_and_endpoint_do_not_complete_stop_without_finished() {
+        for acknowledge in [true, false] {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let request = format!("ws://{}", listener.local_addr().unwrap()).into_client_request().unwrap();
+                let (_audio_tx, audio) = mpsc::channel(1);
+                let (stop_tx, stop) = mpsc::channel(1);
+                let (events, rx) = std::sync::mpsc::channel();
+                let task = tokio::spawn(run_connection(Settings::default(), audio, stop, events,
+                    request, Duration::from_secs(180), Duration::from_millis(100)));
+                let mut socket = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0).await.unwrap();
+                assert!(matches!(socket.next().await.unwrap().unwrap(), Message::Text(_)));
+                socket.send(tokens("合成测试句", true)).await.unwrap();
+                socket.send(tokens("<end>", true)).await.unwrap();
+                // Observe the endpoint being forwarded before stopping, not just
+                // queued on the server. Neither final tokens nor <end> ends a stream.
+                loop {
+                    if rx.try_iter().any(|event| matches!(event, Event::Text(value) if value["tokens"][0]["text"] == "<end>")) { break; }
+                    assert!(!task.is_finished());
+                    tokio::task::yield_now().await;
+                }
+                assert!(!task.is_finished());
+                stop_tx.send(()).await.unwrap();
+                assert_eq!(next_audio_or_end(&mut socket).await, Message::Text("".into()));
+                assert!(!task.is_finished(), "EOS must still await server acknowledgement");
+                if acknowledge {
+                    socket.send(tokens("尾句", true)).await.unwrap();
+                    socket.send(Message::Text(json!({"tokens":[],"finished":true}).to_string().into())).await.unwrap();
+                    task.await.unwrap().unwrap();
+                    let responses: Vec<_> = rx.try_iter().filter_map(|event| if let Event::Text(value) = event { Some(value) } else { None }).collect();
+                    assert_eq!(responses[0]["tokens"][0]["text"], "尾句");
+                    assert_eq!(responses.last().unwrap()["finished"], true);
+                } else {
+                    assert_eq!(task.await.unwrap().unwrap_err(), "Soniox 收尾超时，尾句可能不完整");
+                }
+            }).await.unwrap();
         }
     }
 
