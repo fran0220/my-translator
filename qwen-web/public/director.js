@@ -7,7 +7,7 @@ function render() {
   const lines = Math.max(1, Math.min(3, Math.floor(innerHeight * .88 / line)));
   Object.assign(document.body.style, { background: '#000', color: '#fff' });
   Object.assign(frame.style, { position: 'absolute', left: `${(100 - state.width) / 2}%`, bottom: '6%', width: `${state.width}%`, height: `${line * lines}px`, overflow: 'hidden' });
-  Object.assign(text.style, { position: 'absolute', bottom: '0', width: '100%', fontSize: `${font}px`, lineHeight: `${line}px`, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', textAlign: 'center' });
+  Object.assign(text.style, { position: 'absolute', bottom: '0', width: '100%', fontSize: `${font}px`, lineHeight: `${line}px`, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', textAlign: 'left' });
   text.textContent = state.text;
 }
 window.addEventListener('message', event => {
