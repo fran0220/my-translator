@@ -56,6 +56,12 @@
       <label class="check rotate"><input id="reconnect" type="checkbox" checked><span>自动无缝切换会话<span class="hint" id="rotateHint"></span></span></label>
     </div>
 
+    <details class="group" open>
+      <summary><h2>词库</h2><span class="hint" id="glossaryCount"></span></summary>
+      <textarea id="glossary" rows="4" spellcheck="false" placeholder="每行一条：亦庄 = E-town"></textarea>
+      <p class="hint">每行「原词 = 译法」，中英任一在前均可，按翻译方向自动对应。改动在下次开始或切换会话时生效。</p>
+    </details>
+
     <details class="group">
       <summary><h2>导播输出</h2><span class="hint">黑底白字 · 仅译文 · 3 行</span></summary>
       <label><span class="row">字号 <output id="fontValue">48 px</output></span><input id="font" type="range" min="20" max="120" value="48"></label>

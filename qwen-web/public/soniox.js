@@ -1,6 +1,7 @@
 // Soniox real-time engine: the browser streams PCM straight to Soniox with a single-use temporary key minted by our server.
 // Sessions rotate make-before-break (scheduled ones at the next sentence end): audio switches to the new socket, the old one gets the end-of-stream frame and keeps
 // delivering its final tokens until Soniox reports finished, so nothing spoken at the boundary is lost.
+import { sonioxContext } from './glossary.js';
 const ENDPOINT = 'wss://stt-rt.soniox.com/transcribe-websocket';
 const ROTATE_MS = 30 * 60000, GRACE_MS = 60000, LAG_LIMIT = 6000, UPLOAD_LIMIT = 8000, STALL_MS = 15000, TAIL_MS = 10000, BUFFER_MS = 5000;
 const due = '已满 30 分钟';
@@ -36,8 +37,8 @@ export async function startSoniox(o) {
       enable_endpoint_detection: true, enable_language_identification: true, language_hints: ['zh', 'en'],
       translation: o.language === 'two_way' ? { type: 'two_way', language_a: 'zh', language_b: 'en' } : { type: 'one_way', target_language: o.language },
     };
-    const recent = o.transcript.recent(400);
-    if (recent) cfg.context = { text: `Recent conversation: ${recent}` };
+    const recent = o.transcript.recent(400), glossary = sonioxContext(o.glossary(), o.language);
+    if (recent || glossary) cfg.context = { ...glossary, ...(recent && { text: `Recent conversation: ${recent}` }) };
     return cfg;
   }
   function close(c) {

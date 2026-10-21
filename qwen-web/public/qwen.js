@@ -1,6 +1,7 @@
 // Qwen LiveTranslate over WebRTC. Audio flows browser → Qwen; our server only exchanges the SDP.
 // Rotation is make-before-break: the replacement session is fully configured and receiving the track before the old one
 // stops receiving audio and gets session.finish, so its last sentence is still delivered (up to 10 s) instead of dropped.
+import { qwenPhrases } from './glossary.js';
 const ROTATE_MS = 5 * 60000, GRACE_MS = 60000, LAG_LIMIT = 8000, TAIL_MS = 10000;
 
 function gather(pc, signal) {
@@ -54,7 +55,9 @@ export function startQwen(o) {
     const init = () => {
       if (c.dead || !c.created || c.updated || pc.connectionState !== 'connected' || c.channel?.readyState !== 'open') return;
       c.updated = true;
-      c.channel.send(JSON.stringify({ type: 'session.update', event_id: crypto.randomUUID(), session: { output_modalities: ['text'], translation: { language: o.language } } }));
+      const translation = { language: o.language }, phrases = qwenPhrases(o.glossary(), o.language);
+      if (phrases) translation.corpus = { phrases };
+      c.channel.send(JSON.stringify({ type: 'session.update', event_id: crypto.randomUUID(), session: { output_modalities: ['text'], translation } }));
     };
     const bind = channel => {
       c.channels.add(channel);

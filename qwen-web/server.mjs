@@ -85,7 +85,7 @@ export function createServer({ key = process.env.DASHSCOPE_API_KEY, sonioxKey = 
       }
       if (req.method !== 'GET') return send(405, { error: 'Method not allowed' });
       if (path === '/qwen/api/session') return authed ? send(200, { csrf: session.csrf, engines }) : send(401, { error: '请登录' });
-      const files = { '/qwen/': 'index.html', '/qwen/app.js': 'app.js', '/qwen/style.css': 'style.css', '/qwen/director.html': 'director.html', '/qwen/director.js': 'director.js', '/qwen/transcript.js': 'transcript.js', '/qwen/qwen.js': 'qwen.js', '/qwen/soniox.js': 'soniox.js', '/qwen/pcm-worklet.js': 'pcm-worklet.js' };
+      const files = { '/qwen/': 'index.html', '/qwen/app.js': 'app.js', '/qwen/style.css': 'style.css', '/qwen/director.html': 'director.html', '/qwen/director.js': 'director.js', '/qwen/transcript.js': 'transcript.js', '/qwen/qwen.js': 'qwen.js', '/qwen/soniox.js': 'soniox.js', '/qwen/pcm-worklet.js': 'pcm-worklet.js', '/qwen/glossary.js': 'glossary.js' };
       const file = files[path];
       if (!file) return send(404, { error: 'Not found' });
       const type = file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html';

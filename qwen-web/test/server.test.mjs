@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from '../server.mjs';
+import { parseGlossary, qwenPhrases, sonioxContext } from '../public/glossary.js';
 import { Transcript, SonioxTranscript } from '../public/transcript.js';
 
 test('authentication, CSRF, fixed upstream, body limits and SDP quotas', async t => {
@@ -115,4 +116,16 @@ test('Soniox utterances: endpoint split, late translation, provisional replaceme
   t.accept(b, { tokens: [tok('Next')] });
   assert.deepEqual(t.parts(true), ['Next']);
   assert.deepEqual(t.parts(false), ['late']);
+});
+
+test('glossary orients each pair by target language for Qwen and Soniox', () => {
+  const pairs = parseGlossary('亦庄 = E-town\nAI＝人工智能\n\nnot a pair\n大兴 -> Daxing');
+  assert.deepEqual(pairs, [['亦庄', 'E-town'], ['AI', '人工智能'], ['大兴', 'Daxing']]);
+  assert.deepEqual(qwenPhrases(pairs, 'en'), { 亦庄: 'E-town', 人工智能: 'AI', 大兴: 'Daxing' });
+  assert.deepEqual(qwenPhrases(pairs, 'zh'), { 'E-town': '亦庄', AI: '人工智能', Daxing: '大兴' });
+  assert.equal(qwenPhrases([], 'zh'), null);
+  const ctx = sonioxContext([['亦庄', 'E-town']], 'two_way');
+  assert.deepEqual(ctx.terms, ['亦庄', 'E-town']);
+  assert.deepEqual(ctx.translation_terms, [{ source: 'E-town', target: '亦庄' }, { source: '亦庄', target: 'E-town' }]);
+  assert.deepEqual(sonioxContext([['亦庄', 'E-town']], 'en').translation_terms, [{ source: '亦庄', target: 'E-town' }]);
 });

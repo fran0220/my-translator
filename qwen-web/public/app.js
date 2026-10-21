@@ -1,6 +1,7 @@
 import { Transcript, SonioxTranscript } from './transcript.js';
 import { startQwen } from './qwen.js';
 import { startSoniox } from './soniox.js';
+import { parseGlossary } from './glossary.js';
 const $ = id => document.getElementById(id);
 const DIRECTIONS = {
   qwen: [['zh', '英文 → 中文'], ['en', '中文 → 英文']],
@@ -56,6 +57,11 @@ $('smaller').onclick = () => { size = Math.max(16, size - 2); applyView(prefs.vi
 $('larger').onclick = () => { size = Math.min(56, size + 2); applyView(prefs.view); };
 applyView();
 $('error').onclick = () => error('');
+// Glossary is kept in this browser only; each new session reads the current text.
+$('glossary').value = prefs.glossary ?? '亦庄 = E-town';
+const glossaryCount = () => $('glossaryCount').textContent = `${parseGlossary($('glossary').value).length} 条`;
+$('glossary').oninput = () => { prefs.glossary = $('glossary').value; savePrefs(); glossaryCount(); };
+glossaryCount();
 
 function selectEngine(next) {
   if (next !== engine) {
@@ -186,6 +192,7 @@ async function start(localOnly) {
     const options = {
       stream: audioOnly, audio, input, api, transcript, render,
       language: $('language').value, rotate: $('reconnect').checked,
+      glossary: () => parseGlossary($('glossary').value),
       status: (text, state) => alive() && status(text, state),
       diag: text => { if (alive()) $('diagnostics').textContent = text; },
       metrics: value => alive() && metrics(value),
